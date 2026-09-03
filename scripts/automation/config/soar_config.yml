@@ -1,0 +1,49 @@
+# SOC Home Lab - SOAR Engine Configuration
+
+# Threat Intelligence Settings
+threat_intel:
+  # AbuseIPDB API key (get free key at https://www.abuseipdb.com/account/api)
+  abuseipdb_api_key: "YOUR_API_KEY_HERE"
+  
+  # Local blocklist file path
+  local_blocklist_path: "config/blocklist.txt"
+  
+  # Cache TTL in hours
+  cache_ttl_hours: 24
+
+# Automated Response Settings
+auto_response:
+  # Minimum Wazuh rule level to auto-block source IP
+  block_ip_min_level: 10
+  
+  # Minimum Wazuh rule level to auto-disable account
+  disable_account_min_level: 12
+
+# Response Engine Settings
+response:
+  # Enable dry run mode (simulates actions without executing)
+  dry_run: true
+  
+  # Path to store blocked IPs
+  blocked_ips_path: "config/blocked_ips.txt"
+  
+  # Slack webhook for notifications
+  slack_webhook_url: "YOUR_WEBHOOK_URL"
+
+# Alert Processing
+alert_processing:
+  # Maximum alerts to process per minute
+  rate_limit: 60
+  
+  # Alert retention (hours)
+  retention_hours: 168
+  
+  # Minimum alert level to process
+  min_level: 3
+
+# Logging
+logging:
+  level: "INFO"
+  file: "soar_engine.log"
+  max_size_mb: 50
+  backup_count: 5
