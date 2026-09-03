@@ -1,0 +1,12 @@
+# Kibana Configuration - SOC Home Lab
+server.name: "soc-kibana"
+server.host: "0.0.0.0"
+server.port: 5601
+elasticsearch.hosts: ["http://elasticsearch:9200"]
+elasticsearch.username: "kibana_system"
+elasticsearch.password: "${KIBANA_PASSWORD}"
+xpack.security.enabled: true
+logging.root.level: warn
+kibana.defaultAppId: "discover"
+telemetry.optIn: false
+telemetry.allowChangingOptInStatus: false

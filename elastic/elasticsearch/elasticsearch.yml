@@ -1,0 +1,12 @@
+# Elasticsearch Configuration - SOC Home Lab
+cluster.name: "soc-homelab"
+node.name: "es-node-01"
+network.host: 0.0.0.0
+xpack.security.enabled: true
+xpack.security.transport.ssl.enabled: false
+xpack.ilm.enabled: true
+xpack.monitoring.collection.enabled: true
+indices.memory.index_buffer_size: "20%"
+thread_pool.write.queue_size: 1000
+logger.level: WARN
+action.auto_create_index: "+soc-*,+wazuh-*,+suricata-*,.watches,.triggered_watches,.watcher-history-*"
