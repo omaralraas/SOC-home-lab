@@ -1,0 +1,103 @@
+<!--
+  SOC Home Lab - Lateral Movement Detection Rules
+  Author: Omar Alraas
+  Rule IDs: 100150-100179
+-->
+<group name="custom_lateral_movement,">
+
+  <!-- PsExec execution -->
+  <rule id="100150" level="10">
+    <if_sid>61600</if_sid>
+    <field name="win.eventdata.originalFileName" type="pcre2">(?i)psexe(c|svc)</field>
+    <description>PsExec execution detected - potential lateral movement</description>
+    <mitre>
+      <id>T1570</id>
+      <id>T1021.002</id>
+    </mitre>
+    <group>lateral_movement,psexec,</group>
+  </rule>
+
+  <!-- Suspicious service installation -->
+  <rule id="100151" level="10">
+    <if_sid>60009</if_sid>
+    <field name="win.system.eventID">^7045$</field>
+    <field name="win.eventdata.serviceName" type="pcre2">(?i)(psexe|cobalt|beacon|empire)</field>
+    <description>Suspicious service installed: $(win.eventdata.serviceName)</description>
+    <mitre>
+      <id>T1543.003</id>
+    </mitre>
+    <group>lateral_movement,service_installation,</group>
+  </rule>
+
+  <!-- WMI remote execution -->
+  <rule id="100152" level="8">
+    <if_sid>61600</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(wmic.*\/node:.*process\s+call\s+create)</field>
+    <description>WMI remote process execution detected</description>
+    <mitre>
+      <id>T1047</id>
+    </mitre>
+    <group>lateral_movement,wmi,</group>
+  </rule>
+
+  <!-- Off-hours RDP logon -->
+  <rule id="100153" level="8">
+    <if_sid>60106</if_sid>
+    <field name="win.system.eventID">^4624$</field>
+    <field name="win.eventdata.logonType">^10$</field>
+    <time>10:00pm - 6:00am</time>
+    <description>Off-hours RDP logon from $(win.eventdata.ipAddress)</description>
+    <mitre>
+      <id>T1021.001</id>
+    </mitre>
+    <group>lateral_movement,rdp,off_hours,</group>
+  </rule>
+
+  <!-- Pass-the-Hash indicator -->
+  <rule id="100154" level="12">
+    <if_sid>60106</if_sid>
+    <field name="win.system.eventID">^4624$</field>
+    <field name="win.eventdata.logonType">^9$</field>
+    <field name="win.eventdata.logonProcessName" type="pcre2">seclogo</field>
+    <description>Potential Pass-the-Hash: Type 9 logon with seclogo process</description>
+    <mitre>
+      <id>T1550.002</id>
+    </mitre>
+    <group>lateral_movement,credential_access,</group>
+  </rule>
+
+  <!-- PowerShell remoting -->
+  <rule id="100155" level="8">
+    <if_sid>61600</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(enter-pssession|invoke-command.*-computername|new-pssession)</field>
+    <description>PowerShell remoting to remote host detected</description>
+    <mitre>
+      <id>T1021.006</id>
+    </mitre>
+    <group>lateral_movement,powershell_remoting,</group>
+  </rule>
+
+  <!-- Administrative share access -->
+  <rule id="100156" level="8">
+    <if_sid>60106</if_sid>
+    <field name="win.system.eventID">^5140$</field>
+    <field name="win.eventdata.shareName" type="pcre2">(?i)(ADMIN\$|C\$|IPC\$)</field>
+    <description>Admin share access: $(win.eventdata.shareName) from $(win.eventdata.ipAddress)</description>
+    <mitre>
+      <id>T1021.002</id>
+    </mitre>
+    <group>lateral_movement,smb,admin_share,</group>
+  </rule>
+
+  <!-- Remote scheduled task -->
+  <rule id="100157" level="10">
+    <if_sid>61600</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(schtasks.*\/create.*\/s\s)</field>
+    <description>Remote scheduled task creation - lateral movement via task scheduler</description>
+    <mitre>
+      <id>T1053.005</id>
+    </mitre>
+    <group>lateral_movement,scheduled_task,</group>
+  </rule>
+
+</group>

@@ -1,0 +1,89 @@
+<!--
+  SOC Home Lab - Suspicious Activity Detection Rules
+  Author: Omar Alraas
+  Rule IDs: 100120-100149
+  Focus: PowerShell abuse, LOLBin usage, suspicious file operations
+-->
+<group name="custom_suspicious_activity,">
+
+  <!-- Suspicious PowerShell: Encoded or obfuscated commands -->
+  <rule id="100120" level="12">
+    <if_sid>61600</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(encodedcommand|bypass|hidden|noprofile.*downloadstring)</field>
+    <description>Suspicious PowerShell: Encoded or obfuscated command execution</description>
+    <mitre>
+      <id>T1059.001</id>
+      <id>T1027</id>
+    </mitre>
+    <group>suspicious,powershell,execution,</group>
+  </rule>
+
+  <!-- Known offensive tool command patterns -->
+  <rule id="100121" level="14">
+    <if_sid>61600</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(invoke-kerberoast|invoke-sharphound|get-gpppassword)</field>
+    <description>CRITICAL: Known offensive tool command-line pattern detected</description>
+    <mitre>
+      <id>T1059.001</id>
+      <id>T1003</id>
+    </mitre>
+    <group>suspicious,powershell,offensive_tool,</group>
+  </rule>
+
+  <!-- Credential dumping tool detection -->
+  <rule id="100122" level="15">
+    <if_sid>61600</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(sekurlsa|kerberos::list|lsadump|privilege::debug)</field>
+    <description>CRITICAL: Credential dumping tool arguments detected</description>
+    <mitre>
+      <id>T1003.001</id>
+    </mitre>
+    <group>suspicious,credential_access,</group>
+  </rule>
+
+  <!-- Suspicious file in temp directory -->
+  <rule id="100124" level="8">
+    <if_sid>550</if_sid>
+    <field name="file" type="pcre2">(?i)(\\temp\\|\\tmp\\).*\.(exe|dll|ps1|bat|vbs|js|hta)</field>
+    <description>Executable file created in temp directory: $(file)</description>
+    <mitre>
+      <id>T1204.002</id>
+    </mitre>
+    <group>suspicious,file_creation,</group>
+  </rule>
+
+  <!-- Mass file encryption indicator -->
+  <rule id="100125" level="14" frequency="8" timeframe="30">
+    <if_sid>550</if_sid>
+    <field name="file" type="pcre2">(?i)\.(encrypted|locked|crypto|crypt|enc)$</field>
+    <description>CRITICAL: Rapid file extension changes - possible encryption activity</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+    <group>suspicious,encryption_activity,</group>
+  </rule>
+
+  <!-- Shadow copy deletion -->
+  <rule id="100126" level="15">
+    <if_sid>61600</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(vssadmin.*delete.*shadows|bcdedit.*recoveryenabled.*no)</field>
+    <description>CRITICAL: Volume shadow copy or recovery modification detected</description>
+    <mitre>
+      <id>T1490</id>
+    </mitre>
+    <group>suspicious,impact,</group>
+  </rule>
+
+  <!-- LOLBin abuse for download -->
+  <rule id="100127" level="10">
+    <if_sid>61600</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(certutil.*-urlcache|bitsadmin.*\/transfer|mshta.*http)</field>
+    <description>LOLBin abuse: System binary used for download or execution</description>
+    <mitre>
+      <id>T1218</id>
+      <id>T1105</id>
+    </mitre>
+    <group>suspicious,lolbin,defense_evasion,</group>
+  </rule>
+
+</group>

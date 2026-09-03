@@ -1,0 +1,103 @@
+<!--
+  SOC Home Lab - Custom Brute Force Detection Rules
+  Author: Omar Alraas
+  Rule IDs: 100100-100119
+-->
+<group name="custom_brute_force,authentication_failures,">
+
+  <!-- SSH Brute Force: 5+ failed auth in 2 minutes -->
+  <rule id="100100" level="6" frequency="5" timeframe="120">
+    <if_matched_sid>5710</if_matched_sid>
+    <description>SSH: Multiple failed authentication attempts detected (5+/2min)</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,ssh,pci_dss_11.4,gdpr_IV_35.7.d,</group>
+  </rule>
+
+  <!-- SSH Brute Force: 15+ failed auth - automated attack -->
+  <rule id="100101" level="10" frequency="15" timeframe="120">
+    <if_matched_sid>5710</if_matched_sid>
+    <description>SSH CRITICAL: Automated attack detected (15+/2min)</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,ssh,pci_dss_11.4,</group>
+  </rule>
+
+  <!-- SSH Brute Force: 30+ sustained attack -->
+  <rule id="100102" level="12" frequency="30" timeframe="300">
+    <if_matched_sid>5710</if_matched_sid>
+    <description>SSH SEVERE: Sustained attack (30+ attempts in 5min)</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,ssh,</group>
+  </rule>
+
+  <!-- RDP Brute Force: 5+ failed logons -->
+  <rule id="100103" level="6" frequency="5" timeframe="120">
+    <if_matched_sid>60122</if_matched_sid>
+    <description>RDP: Multiple failed logon attempts (Event 4625, 5+/2min)</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,rdp,windows,</group>
+  </rule>
+
+  <!-- RDP Brute Force: 15+ critical -->
+  <rule id="100104" level="10" frequency="15" timeframe="180">
+    <if_matched_sid>60122</if_matched_sid>
+    <description>RDP CRITICAL: High-volume failed logons (15+/3min)</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,rdp,windows,</group>
+  </rule>
+
+  <!-- Web Login Brute Force -->
+  <rule id="100105" level="6" frequency="10" timeframe="60">
+    <if_matched_sid>31104</if_matched_sid>
+    <description>Web login: Multiple HTTP 401 responses (10+/1min)</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,web,</group>
+  </rule>
+
+  <!-- Account Lockout -->
+  <rule id="100106" level="8">
+    <if_sid>60137</if_sid>
+    <field name="win.system.eventID">^4740$</field>
+    <description>Windows account lockout: $(win.eventdata.targetUserName)</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>authentication_failures,account_lockout,windows,</group>
+  </rule>
+
+  <!-- Distributed Brute Force -->
+  <rule id="100107" level="10" frequency="5" timeframe="300">
+    <if_matched_sid>100106</if_matched_sid>
+    <same_field>win.eventdata.targetUserName</same_field>
+    <description>Distributed attack: Multiple lockouts for same account</description>
+    <mitre>
+      <id>T1110.003</id>
+    </mitre>
+    <group>authentication_failures,distributed,</group>
+  </rule>
+
+  <!-- Successful Login After Failed Attempts -->
+  <rule id="100108" level="10" timeframe="600">
+    <if_matched_sid>100100</if_matched_sid>
+    <if_sid>5715</if_sid>
+    <same_source_ip />
+    <description>ALERT: Successful SSH login after failed attempts from same IP</description>
+    <mitre>
+      <id>T1110.001</id>
+      <id>T1078</id>
+    </mitre>
+    <group>authentication_failures,ssh,compromised,</group>
+  </rule>
+
+</group>
