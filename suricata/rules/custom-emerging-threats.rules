@@ -1,0 +1,46 @@
+# =============================================================================
+# SOC Home Lab - Custom Emerging Threat Detection Rules
+# Author: Omar Alraas
+# SID Range: 1000001-1000050
+# =============================================================================
+
+# --- C2 Beaconing Detection ---
+# Detect regular interval HTTP connections (potential beaconing)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB: Potential C2 beaconing - regular HTTP POST intervals"; flow:established,to_server; http.method; content:"POST"; threshold:type both,track by_src,count 10,seconds 600; classtype:trojan-activity; sid:1000001; rev:1; metadata:mitre_technique_id T1071.001;)
+
+# --- DNS Tunneling Detection ---
+# Long subdomain queries (potential DNS tunneling)
+alert dns $HOME_NET any -> any 53 (msg:"SOC-LAB: Possible DNS tunneling - long subdomain query"; dns.query; content:"."; pcre:"/^[a-zA-Z0-9]{30,}\./"; classtype:policy-violation; sid:1000002; rev:1; metadata:mitre_technique_id T1071.004;)
+
+# High volume DNS queries to single domain
+alert dns $HOME_NET any -> any 53 (msg:"SOC-LAB: High volume DNS queries to single domain"; flow:to_server; threshold:type both,track by_src,count 100,seconds 60; classtype:policy-violation; sid:1000003; rev:1; metadata:mitre_technique_id T1071.004;)
+
+# --- Suspicious TLS Certificates ---
+# Self-signed certificate detection
+alert tls $EXTERNAL_NET any -> $HOME_NET any (msg:"SOC-LAB: Self-signed TLS certificate detected"; tls.cert_subject; content:"CN="; tls.cert_issuer; content:"CN="; flow:established,to_client; classtype:policy-violation; sid:1000004; rev:1;)
+
+# --- Suspicious User Agents ---
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB: Suspicious User-Agent - curl/wget from workstation"; flow:established,to_server; http.user_agent; content:"curl"; nocase; classtype:policy-violation; sid:1000005; rev:1;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB: Suspicious User-Agent - Python requests library"; flow:established,to_server; http.user_agent; content:"python-requests"; nocase; classtype:policy-violation; sid:1000006; rev:1;)
+
+# --- Cryptocurrency Mining ---
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB: Potential cryptomining - Stratum protocol"; flow:established,to_server; content:"stratum+tcp://"; nocase; classtype:policy-violation; sid:1000007; rev:1; metadata:mitre_technique_id T1496;)
+
+alert dns $HOME_NET any -> any 53 (msg:"SOC-LAB: DNS query for known mining pool domain"; dns.query; content:"pool"; nocase; content:"mine"; nocase; distance:0; classtype:policy-violation; sid:1000008; rev:1; metadata:mitre_technique_id T1496;)
+
+# --- Data Exfiltration over DNS ---
+alert dns $HOME_NET any -> any 53 (msg:"SOC-LAB: Potential data exfiltration via DNS TXT query"; dns.query; content:"."; pcre:"/^[a-zA-Z0-9+\/=]{20,}\./"; classtype:bad-unknown; sid:1000009; rev:1; metadata:mitre_technique_id T1048.003;)
+
+# --- Port Scanning Detection ---
+alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"SOC-LAB: Potential TCP port scan detected"; flags:S; threshold:type both,track by_src,count 25,seconds 10; classtype:attempted-recon; sid:1000010; rev:1; metadata:mitre_technique_id T1046;)
+
+# SYN-FIN scan (invalid flag combination)
+alert tcp any any -> $HOME_NET any (msg:"SOC-LAB: TCP SYN+FIN scan detected"; flags:SF; classtype:attempted-recon; sid:1000011; rev:1; metadata:mitre_technique_id T1046;)
+
+# --- SQL Injection in HTTP ---
+alert http $EXTERNAL_NET any -> $HTTP_SERVERS $HTTP_PORTS (msg:"SOC-LAB: Potential SQL injection attempt in HTTP request"; flow:established,to_server; http.uri; pcre:"/(\bunion\b.*\bselect\b|\bor\b\s+\b1\s*=\s*1|drop\s+table|insert\s+into)/i"; classtype:web-application-attack; sid:1000012; rev:1; metadata:mitre_technique_id T1190;)
+
+# --- Suspicious Outbound Connections ---
+# Outbound connections on non-standard ports
+alert tcp $HOME_NET any -> $EXTERNAL_NET [!80,!443,!53,!22,!25,!587,!993,!995] (msg:"SOC-LAB: Outbound connection on non-standard port"; flow:established,to_server; threshold:type both,track by_src,count 5,seconds 300; classtype:policy-violation; sid:1000013; rev:1;)

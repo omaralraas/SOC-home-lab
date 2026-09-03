@@ -1,0 +1,39 @@
+# =============================================================================
+# SOC Home Lab - Network Anomaly Detection Rules
+# Author: Omar Alraas
+# SID Range: 1000020-1000040
+# =============================================================================
+
+# --- ICMP Tunneling ---
+# Unusually large ICMP packets (potential tunneling)
+alert icmp $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB: Large ICMP packet - potential ICMP tunneling"; dsize:>800; classtype:policy-violation; sid:1000020; rev:1; metadata:mitre_technique_id T1095;)
+
+# High rate ICMP traffic
+alert icmp $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB: High rate ICMP traffic - potential tunneling"; threshold:type both,track by_src,count 50,seconds 60; classtype:policy-violation; sid:1000021; rev:1; metadata:mitre_technique_id T1095;)
+
+# --- HTTP on Non-Standard Ports ---
+alert http $HOME_NET any -> $EXTERNAL_NET !$HTTP_PORTS (msg:"SOC-LAB: HTTP traffic on non-standard port"; flow:established,to_server; classtype:policy-violation; sid:1000022; rev:1;)
+
+# --- Large DNS Responses (possible zone transfer) ---
+alert dns any 53 -> $HOME_NET any (msg:"SOC-LAB: Unusually large DNS response - possible zone transfer"; dsize:>4096; classtype:bad-unknown; sid:1000023; rev:1; metadata:mitre_technique_id T1590.002;)
+
+# DNS zone transfer attempt (AXFR)
+alert dns $HOME_NET any -> any 53 (msg:"SOC-LAB: DNS zone transfer (AXFR) attempt detected"; content:"|00 FC|"; offset:12; classtype:attempted-recon; sid:1000024; rev:1; metadata:mitre_technique_id T1590.002;)
+
+# --- SMB Lateral Movement Patterns ---
+# SMB traffic from non-server hosts
+alert tcp $HOME_NET any -> $HOME_NET 445 (msg:"SOC-LAB: SMB connection between workstations - potential lateral movement"; flow:established,to_server; classtype:policy-violation; sid:1000025; rev:1; metadata:mitre_technique_id T1021.002;)
+
+# SMB with named pipe (potential PsExec)
+alert tcp $HOME_NET any -> $HOME_NET 445 (msg:"SOC-LAB: SMB named pipe access - potential remote execution"; flow:established,to_server; content:"|FF|SMB"; content:"\\PIPE\\"; nocase; classtype:policy-violation; sid:1000026; rev:1; metadata:mitre_technique_id T1021.002;)
+
+# --- Tor Exit Node Connections ---
+alert tcp $HOME_NET any -> $EXTERNAL_NET [9001,9030,9050,9051,9150] (msg:"SOC-LAB: Connection to common Tor port"; flow:established,to_server; classtype:policy-violation; sid:1000027; rev:1; metadata:mitre_technique_id T1090.003;)
+
+# --- ARP Spoofing Detection ---
+alert arp any any -> any any (msg:"SOC-LAB: ARP request flood - potential ARP spoofing"; threshold:type both,track by_src,count 50,seconds 10; classtype:bad-unknown; sid:1000028; rev:1;)
+
+# --- Cleartext Password Protocols ---
+alert tcp $HOME_NET any -> any 21 (msg:"SOC-LAB: FTP cleartext connection detected"; flow:established,to_server; content:"USER"; nocase; classtype:policy-violation; sid:1000029; rev:1;)
+
+alert tcp $HOME_NET any -> any 23 (msg:"SOC-LAB: Telnet cleartext connection detected"; flow:to_server,established; classtype:policy-violation; sid:1000030; rev:1;)
