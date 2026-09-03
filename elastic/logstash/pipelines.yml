@@ -1,0 +1,6 @@
+- pipeline.id: syslog
+  path.config: "/usr/share/logstash/pipeline/syslog.conf"
+- pipeline.id: windows-events
+  path.config: "/usr/share/logstash/pipeline/windows-events.conf"
+- pipeline.id: suricata
+  path.config: "/usr/share/logstash/pipeline/suricata.conf"
