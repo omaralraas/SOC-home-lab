@@ -1,0 +1,35 @@
+title: DNS Tunneling Detection
+id: e6f7a8b9-0c1d-2e3f-4a5b-6c7d8e9f0123
+status: experimental
+description: |
+  Detects potential DNS tunneling activity through analysis of DNS query
+  characteristics including excessive length subdomains, high query frequency
+  to single domains, and encoded data patterns.
+author: Omar Alraas
+date: 2025/01/25
+references:
+  - https://attack.mitre.org/techniques/T1071/004/
+  - https://attack.mitre.org/techniques/T1048/003/
+tags:
+  - attack.command_and_control
+  - attack.exfiltration
+  - attack.t1071.004
+  - attack.t1048.003
+logsource:
+  category: dns
+detection:
+  selection_long_query:
+    query|re: '^[a-zA-Z0-9]{30,}\.'
+  selection_encoded_data:
+    query|re: '^[A-Za-z0-9+/=]{20,}\.'
+  selection_high_entropy:
+    query|contains:
+      - '.dnscat.'
+      - '.dns2tcp.'
+      - '.iodine.'
+  condition: selection_long_query or selection_encoded_data or selection_high_entropy
+falsepositives:
+  - CDN domains with long subdomains
+  - DKIM/SPF DNS records
+  - Legitimate encoded DNS records
+level: high

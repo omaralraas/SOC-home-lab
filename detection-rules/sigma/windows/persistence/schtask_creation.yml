@@ -1,0 +1,49 @@
+title: Suspicious Scheduled Task Creation
+id: 3a6b14c7-9f8e-4d2a-b5c1-e7f3a9d80123
+status: stable
+description: |
+  Detects creation of scheduled tasks that may indicate persistence mechanisms.
+  Monitors Windows Security Event ID 4698 (scheduled task created) for suspicious
+  task names, executable paths, or encoded commands.
+author: Omar Alraas
+date: 2025/01/15
+modified: 2025/02/01
+references:
+  - https://attack.mitre.org/techniques/T1053/005/
+  - https://docs.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4698
+tags:
+  - attack.persistence
+  - attack.privilege_escalation
+  - attack.t1053.005
+logsource:
+  product: windows
+  service: security
+  definition: Requirements - audit policy for Object Access > Audit Other Object Access Events must be enabled
+detection:
+  selection_event:
+    EventID: 4698
+  selection_suspicious_paths:
+    TaskContent|contains:
+      - '\AppData\Local\Temp\'
+      - '\Users\Public\'
+      - '\ProgramData\'
+      - '\Windows\Temp\'
+      - 'powershell'
+      - 'cmd.exe /c'
+      - 'mshta'
+      - 'wscript'
+      - 'cscript'
+      - 'rundll32'
+  selection_suspicious_names:
+    TaskName|contains:
+      - 'update'
+      - 'sync'
+      - 'helper'
+      - 'service'
+      - 'system'
+  condition: selection_event and (selection_suspicious_paths or selection_suspicious_names)
+falsepositives:
+  - Legitimate software installers creating update tasks
+  - System administration scripts
+  - GPO-deployed scheduled tasks
+level: medium
