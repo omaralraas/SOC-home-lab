@@ -1,117 +1,148 @@
 /*
-  SOC Home Lab - YARA Rules: Suspicious Scripts
+  SOC Home Lab - YARA Rules: Malicious Scripts
   Author: Omar Alraas
-  Description: Detection rules for obfuscated scripts, reverse shells, and credential harvesters
+  Tests:  tests/yara
+
+  Rules key on combinations of behaviour (fetch or decode, then execute)
+  rather than on single keywords, so ordinary admin scripts that merely use
+  -NoProfile or Base64 do not match.
 */
 
-rule Suspicious_Obfuscated_PowerShell
+rule Suspicious_PowerShell_Loader
 {
     meta:
-        description = "Detects obfuscated PowerShell scripts using common evasion techniques"
+        description = "PowerShell that downloads or decodes content and executes it in memory"
         author = "Omar Alraas"
+        date = "2025-01-25"
+        modified = "2026-10-25"
         severity = "high"
         mitre_attack = "T1059.001"
-        date = "2025-01-25"
 
     strings:
-        $enc_cmd = "-EncodedCommand" ascii nocase
-        $enc_short = "-enc " ascii nocase
-        $bypass = "-ExecutionPolicy Bypass" ascii nocase
-        $hidden = "-WindowStyle Hidden" ascii nocase
-        $noprofile = "-NoProfile" ascii nocase
-        $frombase64 = "FromBase64String" ascii nocase
-        $decompress = "IO.Compression" ascii nocase
-        $reflection = "Reflection.Assembly" ascii nocase
-        $download = "DownloadString(" ascii nocase
-        $webclient = "Net.WebClient" ascii nocase
-        $iex = "IEX(" ascii nocase
-        $invoke_expr = "Invoke-Expression" ascii nocase
+        $exec1 = "IEX" ascii wide nocase fullword
+        $exec2 = "Invoke-Expression" ascii wide nocase
+        $exec3 = "Reflection.Assembly]::Load" ascii wide nocase
+        $fetch1 = "DownloadString" ascii wide nocase
+        $fetch2 = "DownloadData" ascii wide nocase
+        $fetch3 = "Net.WebClient" ascii wide nocase
+        $fetch4 = "Invoke-WebRequest" ascii wide nocase
+        $fetch5 = "Invoke-RestMethod" ascii wide nocase
+        $decode1 = "FromBase64String" ascii wide nocase
+        $decode2 = "IO.Compression.GzipStream" ascii wide nocase
+        $decode3 = "IO.Compression.DeflateStream" ascii wide nocase
 
     condition:
-        3 of them
+        filesize < 2MB and 1 of ($exec*) and (1 of ($fetch*) or 1 of ($decode*))
 }
 
-rule Suspicious_Base64_Payload
+rule Suspicious_Decode_And_Execute
 {
     meta:
-        description = "Detects large Base64 encoded payloads in script files"
+        description = "Script decodes an embedded payload and passes it straight to an eval/exec primitive"
         author = "Omar Alraas"
-        severity = "medium"
+        date = "2026-10-25"
+        severity = "high"
         mitre_attack = "T1027"
-        date = "2025-01-25"
 
     strings:
-        $b64_pattern = /[A-Za-z0-9+\/]{100,}={0,2}/ ascii
+        $py_dec = "b64decode(" ascii
+        $py_exec = /\bexec\s*\(/ ascii
+        $js_dec = /\batob\s*\(/ ascii
+        $js_eval = /\beval\s*\(/ ascii
+        $sh_dec = "base64 -d" ascii
+        $sh_pipe1 = "| bash" ascii
+        $sh_pipe2 = "|bash" ascii
+        $sh_pipe3 = "| sh" ascii fullword
 
     condition:
-        #b64_pattern > 0 and filesize < 5MB
+        filesize < 1MB and (
+            ($py_dec and $py_exec) or
+            ($js_dec and $js_eval) or
+            ($sh_dec and 1 of ($sh_pipe*))
+        )
 }
 
-rule Suspicious_Reverse_Shell_Bash
+rule Suspicious_Reverse_Shell_Unix
 {
     meta:
-        description = "Detects bash reverse shell one-liners"
+        description = "Bash / netcat / socat reverse shell one-liners"
         author = "Omar Alraas"
+        date = "2025-01-25"
+        modified = "2026-10-25"
         severity = "critical"
         mitre_attack = "T1059.004"
-        date = "2025-01-25"
 
     strings:
-        $bash_rs1 = "bash -i >& /dev/tcp/" ascii
-        $bash_rs2 = "bash -c 'bash -i" ascii
-        $nc_rs1 = "nc -e /bin/sh" ascii
-        $nc_rs2 = "nc -e /bin/bash" ascii
-        $nc_rs3 = "ncat -e /bin/sh" ascii
-        $mkfifo = "mkfifo /tmp/" ascii
+        $bash1 = "bash -i >& /dev/tcp/" ascii
+        $bash2 = "bash -i > /dev/tcp/" ascii
+        $bash3 = "0>&1" ascii
         $dev_tcp = "/dev/tcp/" ascii
+        $nc1 = "nc -e /bin/sh" ascii
+        $nc2 = "nc -e /bin/bash" ascii
+        $nc3 = "ncat -e /bin/sh" ascii
+        $nc4 = "ncat --exec" ascii
+        $mkfifo = "mkfifo /tmp/" ascii
+        $nc_plain = "nc " ascii
+        $socat = "socat" ascii fullword
+        $socat_exec = "exec:/bin/" ascii
 
     condition:
-        any of ($bash_rs*) or any of ($nc_rs*) or ($mkfifo and $dev_tcp)
+        filesize < 1MB and (
+            $bash1 or $bash2 or ($dev_tcp and $bash3) or
+            1 of ($nc1, $nc2, $nc3, $nc4) or
+            ($mkfifo and $nc_plain) or
+            ($socat and $socat_exec)
+        )
 }
 
 rule Suspicious_Reverse_Shell_Python
 {
     meta:
-        description = "Detects Python reverse shell patterns"
+        description = "Python reverse shell: socket connect wired to a shell via pty or dup2"
         author = "Omar Alraas"
+        date = "2025-01-25"
+        modified = "2026-10-25"
         severity = "critical"
         mitre_attack = "T1059.006"
-        date = "2025-01-25"
 
     strings:
-        $py_socket = "socket.socket" ascii
-        $py_connect = ".connect((" ascii
-        $py_subprocess = "subprocess" ascii
-        $py_pty = "pty.spawn" ascii
-        $py_os_dup2 = "os.dup2" ascii
-        $py_shell = "/bin/sh" ascii
+        $socket = "socket.socket" ascii
+        $connect = ".connect((" ascii
+        $pty = "pty.spawn" ascii
+        $dup2 = "os.dup2" ascii
+        $subprocess = "subprocess.call" ascii
+        $shell = "/bin/sh" ascii
+        $bash = "/bin/bash" ascii
 
     condition:
-        $py_socket and $py_connect and ($py_subprocess or $py_pty or ($py_os_dup2 and $py_shell))
+        filesize < 1MB and $socket and $connect and ($pty or ($dup2 and ($subprocess or $shell or $bash)))
 }
 
-rule Suspicious_Credential_Harvester
+rule Suspicious_Credential_Store_Dump
 {
     meta:
-        description = "Detects scripts designed to harvest credentials"
+        description = "Script that saves the SAM/SYSTEM/SECURITY hives, copies ntds.dit or dumps LSASS"
         author = "Omar Alraas"
-        severity = "high"
-        mitre_attack = "T1003"
         date = "2025-01-25"
+        modified = "2026-10-25"
+        severity = "critical"
+        mitre_attack = "T1003"
 
     strings:
-        $sam = "\\SAM" ascii wide
-        $system = "\\SYSTEM" ascii wide
-        $security = "\\SECURITY" ascii wide
-        $ntds = "ntds.dit" ascii wide nocase
-        $lsass = "lsass" ascii wide nocase
-        $credential = "credential" ascii wide nocase
-        $password = "password" ascii wide nocase
-        $dump = "dump" ascii wide nocase
-        $extract = "extract" ascii wide nocase
+        $hive_sam = "save hklm\\sam" ascii wide nocase
+        $hive_system = "save hklm\\system" ascii wide nocase
+        $hive_security = "save hklm\\security" ascii wide nocase
+        $ntds1 = "ntdsutil" ascii wide nocase
+        $ntds2 = "\\NTDS\\ntds.dit" ascii wide nocase
+        $ifm = "ifm" ascii wide nocase fullword
+        $lsass1 = "comsvcs.dll, MiniDump" ascii wide nocase
+        $lsass2 = "comsvcs.dll MiniDump" ascii wide nocase
+        $lsass3 = "sekurlsa::" ascii wide nocase
 
     condition:
-        (2 of ($sam, $system, $security)) or
-        ($ntds and ($dump or $extract)) or
-        ($lsass and ($dump or $credential))
+        filesize < 5MB and (
+            2 of ($hive*) or
+            ($ntds1 and $ifm) or $ntds2 or
+            any of ($lsass*)
+        )
 }
