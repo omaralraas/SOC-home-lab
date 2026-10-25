@@ -6,14 +6,17 @@
 | **Title** | Brute Force Attack Response |
 | **Severity** | Medium - Critical |
 | **Author** | Omar Alraas |
-| **Last Updated** | 2025-02-01 |
+| **Last Updated** | 2026-10-25 |
 | **MITRE ATT&CK** | T1110 (Brute Force), T1078 (Valid Accounts) |
 
 ## Objective
 Detect, block, and remediate brute force attacks against authentication services (SSH, RDP, Web) while determining if any accounts were compromised.
 
 ## Detection Sources
-- Wazuh rules: 100100-100108 (custom brute force rules)
+- Wazuh stock rules: 5712 / 5763 (SSH brute force), 60204 (Windows logon failures), 40112 (SSH
+  success after failures)
+- Wazuh custom rules: 100100 (password spraying), 100101 (lockout storm), 100102 (remote logon
+  after a Windows brute force), 100103 (root SSH login), 100104 (web login brute force)
 - Suricata: Port scan detection rules
 - ELK: Failed logon event correlation
 
@@ -44,24 +47,28 @@ flowchart TD
 - [ ] Identify targeted user accounts
 
 ### 1.2 Check for Compromise
-```kql
-# KQL - Check for successful login after failures from same IP
-winlog.event_id:4624 AND source.ip:<ATTACKER_IP>
-AND @timestamp > "<ATTACK_START_TIME>"
+```esql
+FROM logs-soc.windows-*, logs-soc.syslog-*
+| WHERE source.ip == "<ATTACKER_IP>" AND @timestamp > "<ATTACK_START_TIME>"
+    AND (event.code == "4624" OR event.outcome == "success")
+| KEEP @timestamp, host.name, user.name, winlog.event_data.TargetUserName, event.code, event.outcome
+| SORT @timestamp
 ```
+Over longer ranges, run the "SSH sources that failed and then succeeded" and "Password spraying"
+hunts in [credential_access_hunting.md](../../scripts/threat-hunting/esql/credential_access_hunting.md).
 - [ ] Search for successful logins from the attacking IP(s)
 - [ ] Review any post-authentication activity from compromised accounts
 
 ## Phase 2: Containment
 
 ### 2.1 Block Attacker
-- [ ] Add source IP to pfSense blocklist
-- [ ] Activate Wazuh active response (auto-block via rules 100100-100102)
-  ```xml
-  <!-- Wazuh active response triggers automatically -->
-  <!-- Manual block if needed: -->
-  iptables -I INPUT -s <ATTACKER_IP> -j DROP
-  ```
+- [ ] Confirm automatic containment fired:
+  - Wazuh active response `firewall-drop` (rules 5712, 5763, 100104) or `netsh` (60204, 100100)
+    blocks the source on the targeted host for 1 hour
+  - The SOAR engine adds the source to the pfSense `SOAR_BLOCKLIST` alias
+    (`curl http://10.0.1.10:5000/blocklist.txt`); its audit events are Wazuh rules 100190-100192,
+    and 100191 means the action failed
+- [ ] If automation did not fire, block manually at pfSense (the source of truth for perimeter blocks)
 - [ ] If distributed attack, enable account lockout policies
 - [ ] If internal source, isolate the compromised host
 
