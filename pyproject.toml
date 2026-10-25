@@ -6,6 +6,8 @@ requires-python = ">=3.11"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# the lab scripts live in hyphenated folders and are imported as top-level modules
+pythonpath = [".", "scripts/log-analysis", "scripts/automation", "scripts/threat-hunting"]
 addopts = "-ra"
 markers = [
     "docker: needs a Docker daemon (starts Wazuh / Suricata containers)",
@@ -19,5 +21,5 @@ target-version = "py311"
 select = ["E", "F", "W", "I", "B", "UP", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-# subprocess calls to the docker CLI and asserts are the point of the tests
-"tests/**" = ["S101", "S603", "S607"]
+# docker CLI calls, asserts, fake secrets and seeded PRNGs are expected in tests
+"tests/**" = ["S101", "S105", "S106", "S311", "S603", "S607"]
