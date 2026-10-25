@@ -37,7 +37,7 @@ flowchart LR
 | Wazuh 4.14 | `tests/wazuh`: boots `wazuh-manager` with the repo's `ossec.conf`, rules and `agent.conf` mounted exactly as compose does; replays YAML cases through the `wazuh-logtest` socket | The rule that fires on each event or event sequence (thresholds, correlation windows), that analysisd loads the ruleset without warnings, `wazuh-analysisd -t` and `verify-agent-conf` pass |
 | Wazuh (static) | `tests/wazuh/test_ruleset_lint.py`: replays rule load order and sid/group marking over the 4,512 stock rules | No custom rule silently hides events from stock correlation rules (see below) |
 | Sigma | `tools/sigma_engine.py` evaluates pySigma's parsed condition tree against JSON events; `sigma check --fail-on-issues` | Each rule matches its true positives and none of its benign events; ATT&CK v20 tags valid |
-| Suricata 8 | `tests/suricata`: scapy builds 36 PCAPs (full TCP sessions, hand-encoded TLS and SMB2); Suricata replays each with the lab overlay | The exact set of lab SIDs per scenario, including suppressions from `threshold.config` |
+| Suricata 8 | `tests/suricata`: scapy builds 34 PCAP scenarios (full TCP sessions, hand-encoded TLS and SMB2); Suricata replays each with the lab overlay | The exact set of lab SIDs per scenario, including suppressions from `threshold.config` |
 | YARA | `tests/yara`: compiled with warnings as errors; samples assembled in memory | Each sample matches exactly its expected rules; no slow regexes or unreferenced strings |
 | ES\|QL hunts | `tests/elastic`: seeded Elasticsearch 9.5; full compose stack in the `e2e` job | Every hunt parses, its fields exist, and it surfaces the activity planted for it |
 
