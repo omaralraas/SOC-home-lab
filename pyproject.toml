@@ -8,9 +8,10 @@ requires-python = ">=3.11"
 testpaths = ["tests"]
 # the lab scripts live in hyphenated folders and are imported as top-level modules
 pythonpath = [".", "scripts/log-analysis", "scripts/automation", "scripts/threat-hunting"]
-addopts = "-ra"
+addopts = "-ra -m \"not e2e\""
 markers = [
-    "docker: needs a Docker daemon (starts Wazuh / Suricata containers)",
+    "docker: needs a Docker daemon (starts Wazuh / Suricata / Elasticsearch containers)",
+    "e2e: brings up the full Elastic stack (about 3 GB RAM); run with -m e2e",
 ]
 
 [tool.ruff]
@@ -23,3 +24,5 @@ select = ["E", "F", "W", "I", "B", "UP", "S"]
 [tool.ruff.lint.per-file-ignores]
 # docker CLI calls, asserts, fake secrets and seeded PRNGs are expected in tests
 "tests/**" = ["S101", "S105", "S106", "S311", "S603", "S607"]
+# fixture data: long Windows paths and encoded DNS labels are kept verbatim
+"tests/elastic/seed.py" = ["E501"]

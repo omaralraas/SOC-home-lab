@@ -1,0 +1,10 @@
+# SOC Home Lab - Filebeat on the Ubuntu server: ship auth.log to Logstash
+# (elastic/logstash/pipeline/syslog.conf parses and normalises the lines).
+filebeat.inputs:
+  - type: filestream
+    id: linux-auth
+    paths:
+      - /var/log/auth.log
+
+output.logstash:
+  hosts: ["10.0.1.11:5044"]

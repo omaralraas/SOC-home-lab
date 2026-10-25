@@ -1,10 +1,29 @@
-version: '3.8'
+# SOC Home Lab - Elastic analytics tier (Elasticsearch, Logstash, Kibana 9.5)
+#
+#   cp .env.example .env && docker compose up -d   ->  http://localhost:5601 (elastic / ELASTIC_PASSWORD)
+#
+# Single node, security enabled, HTTP without TLS inside the SOC VLAN. The
+# one-shot `setup` service sets the kibana_system password and creates a
+# least-privilege `logstash_internal` user that can only write the
+# logs-soc.* data streams, so Logstash never holds the superuser password.
 
 services:
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    user: "0"
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - KIBANA_PASSWORD=${KIBANA_PASSWORD}
+      - LOGSTASH_PASSWORD=${LOGSTASH_PASSWORD}
+    volumes:
+      - ./setup/setup.sh:/setup.sh:ro
+    entrypoint: ["bash", "/setup.sh"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION:-8.12.0}
-    container_name: elasticsearch
-    hostname: elasticsearch
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
     restart: unless-stopped
     environment:
       - node.name=es-node-01
@@ -15,96 +34,65 @@ services:
       - xpack.security.http.ssl.enabled=false
       - xpack.license.self_generated.type=basic
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
-      - "ES_JAVA_OPTS=-Xms${ES_MEM_LIMIT:-1g} -Xmx${ES_MEM_LIMIT:-1g}"
+      - ES_JAVA_OPTS=-Xms${ES_HEAP} -Xmx${ES_HEAP}
     ulimits:
-      memlock:
-        soft: -1
-        hard: -1
+      memlock: { soft: -1, hard: -1 }
     volumes:
-      - elasticsearch_data:/usr/share/elasticsearch/data
-      - ./elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+      - elasticsearch-data:/usr/share/elasticsearch/data
     ports:
-      - "${ES_PORT:-9200}:9200"
-      - "9300:9300"
-    networks:
-      - elk-network
+      - "9201:9200"   # 9200 on the host is taken by the Wazuh indexer
     healthcheck:
-      test: ["CMD-SHELL", "curl -s -u elastic:${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -qE 'green|yellow'"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
-    deploy:
-      resources:
-        limits:
-          memory: ${MEM_LIMIT:-2G}
+      test: ["CMD-SHELL", "curl -s -u elastic:${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
 
   logstash:
-    image: docker.elastic.co/logstash/logstash:${STACK_VERSION:-8.12.0}
-    container_name: logstash
-    hostname: logstash
+    image: docker.elastic.co/logstash/logstash:${STACK_VERSION}
     restart: unless-stopped
     environment:
-      - xpack.monitoring.elasticsearch.hosts=http://elasticsearch:9200
-      - xpack.monitoring.elasticsearch.username=elastic
-      - xpack.monitoring.elasticsearch.password=${ELASTIC_PASSWORD}
-      - "LS_JAVA_OPTS=-Xms512m -Xmx512m"
+      - LOGSTASH_PASSWORD=${LOGSTASH_PASSWORD}
+      - LS_JAVA_OPTS=-Xms512m -Xmx512m
+      - XPACK_MONITORING_ENABLED=false
     volumes:
-      - ./logstash/pipeline/:/usr/share/logstash/pipeline/:ro
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
       - ./logstash/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
-      - logstash_data:/usr/share/logstash/data
     ports:
-      - "5044:5044"
-      - "5045:5045"
-      - "5514:5514/udp"
+      - "5044:5044"       # Filebeat: Linux auth/syslog
+      - "5045:5045"       # Winlogbeat: Windows Security + Sysmon
+      - "5046:5046"       # Filebeat: Suricata eve.json
+      - "5514:5514/udp"   # pfSense / network syslog
       - "5514:5514/tcp"
-      - "9600:9600"
-    networks:
-      - elk-network
+    healthcheck:
+      # green once every pipeline (and its inputs) is running
+      test: ["CMD-SHELL", "curl -s localhost:9600/_health_report | grep -q '\"status\":\"green\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     depends_on:
-      elasticsearch:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 1G
+      setup:
+        condition: service_completed_successfully
 
   kibana:
-    image: docker.elastic.co/kibana/kibana:${STACK_VERSION:-8.12.0}
-    container_name: kibana
-    hostname: kibana
+    image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
     restart: unless-stopped
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - ELASTICSEARCH_USERNAME=kibana_system
       - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
-      - xpack.security.enabled=true
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${KIBANA_ENCRYPTION_KEY}
+      - XPACK_SECURITY_ENCRYPTIONKEY=${KIBANA_ENCRYPTION_KEY}
+      - TELEMETRY_OPTIN=false
     volumes:
-      - ./kibana/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
-      - kibana_data:/usr/share/kibana/data
+      - kibana-data:/usr/share/kibana/data
     ports:
-      - "${KIBANA_PORT:-5601}:5601"
-    networks:
-      - elk-network
+      - "5601:5601"
     depends_on:
-      elasticsearch:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 1G
+      setup:
+        condition: service_completed_successfully
 
 volumes:
-  elasticsearch_data:
-    driver: local
-  logstash_data:
-    driver: local
-  kibana_data:
-    driver: local
-
-networks:
-  elk-network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.26.0.0/24
+  elasticsearch-data:
+  kibana-data:

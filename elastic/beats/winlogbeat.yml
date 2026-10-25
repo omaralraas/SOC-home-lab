@@ -1,0 +1,20 @@
+# SOC Home Lab - Winlogbeat 9 on the Windows 10 endpoint
+#
+# Winlogbeat's Security / Sysmon / PowerShell ECS mapping runs as Elasticsearch
+# ingest pipelines. Install them once, straight to Elasticsearch:
+#
+#   .\winlogbeat.exe setup --pipelines -E output.logstash.enabled=false `
+#     -E 'output.elasticsearch.hosts=["http://10.0.1.11:9201"]' `
+#     -E output.elasticsearch.username=elastic -E output.elasticsearch.password=<ELASTIC_PASSWORD>
+#
+# Events then flow through Logstash, which forwards [@metadata][pipeline] so
+# the pipelines still run (elastic/logstash/pipeline/windows-events.conf).
+winlogbeat.event_logs:
+  - name: Security
+  - name: System
+  - name: Microsoft-Windows-Sysmon/Operational
+  - name: Microsoft-Windows-PowerShell/Operational
+    event_id: 4103, 4104
+
+output.logstash:
+  hosts: ["10.0.1.11:5045"]
