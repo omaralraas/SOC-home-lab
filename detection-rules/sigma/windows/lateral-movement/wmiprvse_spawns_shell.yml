@@ -1,0 +1,35 @@
+title: WMI Provider Host Spawned a Shell or Script Host
+id: 6a2c55ad-3083-4796-bdd6-8b22e27b8ecc
+status: test
+description: |
+  Detects WmiPrvSE.exe starting cmd, PowerShell or a script host, the
+  target-side footprint of remote WMI execution (wmic /node, Impacket
+  wmiexec, Invoke-WmiMethod). Catches lateral movement even when the source
+  host is not monitored.
+references:
+  - https://attack.mitre.org/techniques/T1047/
+author: Omar Alraas
+date: 2026-10-25
+tags:
+  - attack.execution
+  - attack.t1047
+  - attack.lateral-movement
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    ParentImage|endswith: '\WmiPrvSE.exe'
+    Image|endswith:
+      - '\cmd.exe'
+      - '\powershell.exe'
+      - '\pwsh.exe'
+      - '\mshta.exe'
+      - '\rundll32.exe'
+      - '\regsvr32.exe'
+      - '\wscript.exe'
+      - '\cscript.exe'
+  condition: selection
+falsepositives:
+  - Management tooling (SCCM, monitoring agents) that runs scripts through WMI
+level: high

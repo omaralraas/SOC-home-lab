@@ -1,63 +1,52 @@
 #!/usr/bin/env python3
 """
-SOC Home Lab - Windows Event Log Parser
-=========================================
-Parses Windows Security event log XML exports, detects anomalies,
-and generates a timeline of suspicious activity.
+SOC Home Lab - Windows Security Log Triage
+==========================================
+Parses a Security log exported as XML (wevtutil qe Security /f:xml, or
+Event Viewer "Save as XML"), normalises the events and runs triage checks:
+password spraying, failed-logon bursts, off-hours interactive logons,
+service installs, account creation and audit-log clearing.
 
 Author: Omar Alraas
-Usage:  python windows_event_parser.py --file SecurityEvents.xml --output report.json
+Usage:  python windows_event_parser.py --file security.xml --output report.json
 """
 
-import xml.etree.ElementTree as ET
-import json
+from __future__ import annotations
+
 import argparse
+import json
+import re
 import sys
-from collections import defaultdict, Counter
+import xml.etree.ElementTree as ET  # noqa: S405 - parses exported logs from lab hosts
+from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Optional, Set
 
+NS = "{http://schemas.microsoft.com/win/2004/08/events/event}"
 
-# Windows Security Event ID mappings
-EVENT_DESCRIPTIONS = {
+EVENT_NAMES = {
+    1102: "Audit Log Cleared",
     4624: "Successful Logon",
     4625: "Failed Logon",
-    4634: "Logoff",
     4648: "Explicit Credential Logon",
     4672: "Special Privileges Assigned",
     4688: "Process Creation",
     4697: "Service Installed",
     4698: "Scheduled Task Created",
     4720: "User Account Created",
-    4722: "User Account Enabled",
-    4724: "Password Reset Attempted",
-    4728: "Member Added to Security Group",
     4732: "Member Added to Local Group",
     4740: "Account Locked Out",
     7045: "New Service Installed",
 }
 
-# MITRE ATT&CK mappings for events
-MITRE_MAPPINGS = {
-    4625: {"technique": "T1110", "tactic": "Credential Access", "name": "Brute Force"},
-    4648: {"technique": "T1078", "tactic": "Defense Evasion", "name": "Valid Accounts"},
-    4688: {"technique": "T1059", "tactic": "Execution", "name": "Command Interpreter"},
-    4697: {"technique": "T1543.003", "tactic": "Persistence", "name": "Windows Service"},
-    4698: {"technique": "T1053.005", "tactic": "Persistence", "name": "Scheduled Task"},
-    4720: {"technique": "T1136.001", "tactic": "Persistence", "name": "Create Account"},
-    7045: {"technique": "T1543.003", "tactic": "Persistence", "name": "Windows Service"},
-}
-
-# Logon type descriptions
 LOGON_TYPES = {
-    "2": "Interactive (local)",
+    "2": "Interactive",
     "3": "Network",
     "4": "Batch",
     "5": "Service",
     "7": "Unlock",
     "8": "NetworkCleartext",
-    "9": "NewCredentials (RunAs)",
+    "9": "NewCredentials",
     "10": "RemoteInteractive (RDP)",
     "11": "CachedInteractive",
 }
@@ -65,319 +54,241 @@ LOGON_TYPES = {
 
 @dataclass
 class WindowsEvent:
-    """Represents a parsed Windows Security event."""
     event_id: int
-    timestamp: str
+    timestamp: datetime
     computer: str
-    description: str
-    logon_type: Optional[str] = None
-    logon_type_desc: Optional[str] = None
-    target_user: Optional[str] = None
-    target_domain: Optional[str] = None
-    source_ip: Optional[str] = None
-    process_name: Optional[str] = None
-    command_line: Optional[str] = None
-    logon_id: Optional[str] = None
-    service_name: Optional[str] = None
-    mitre_technique: Optional[str] = None
-    mitre_tactic: Optional[str] = None
-    is_suspicious: bool = False
-    suspicion_reason: Optional[str] = None
+    data: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def name(self) -> str:
+        return EVENT_NAMES.get(self.event_id, f"Event {self.event_id}")
+
+    def get(self, key: str) -> str:
+        value = self.data.get(key, "")
+        return "" if value in ("-", "%%") else value
 
 
 @dataclass
-class AnomalyAlert:
-    """Represents a detected anomaly."""
-    alert_type: str
+class Finding:
+    title: str
     severity: str
+    mitre_technique: str
     description: str
-    events: List[Dict] = field(default_factory=list)
-    mitre_technique: Optional[str] = None
-    recommendation: str = ""
+    evidence: list[dict] = field(default_factory=list)
 
 
-@dataclass
-class WindowsEventReport:
-    """Complete Windows event analysis report."""
-    total_events: int = 0
-    event_summary: Dict[int, int] = field(default_factory=dict)
-    anomalies: List[AnomalyAlert] = field(default_factory=list)
-    suspicious_events: List[Dict] = field(default_factory=list)
-    timeline: List[Dict] = field(default_factory=list)
-    unique_users: int = 0
-    unique_source_ips: int = 0
-    analysis_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+# --------------------------------------------------------------------------- #
+# Parsing
+# --------------------------------------------------------------------------- #
 
 
-class WindowsEventParser:
-    """Parses Windows Security Event Log XML exports."""
+def _child(elem: ET.Element, tag: str) -> ET.Element | None:
+    """Namespaced lookup with a fallback for exports that drop the namespace.
 
-    def __init__(self):
-        self.ns = {
-            'evt': 'http://schemas.microsoft.com/win/2004/08/events/event'
-        }
+    Note: `a.find(x) or a.find(y)` is wrong here; an Element with no children
+    is falsy, so a found leaf element would be discarded.
+    """
+    found = elem.find(NS + tag)
+    return found if found is not None else elem.find(tag)
 
-    def parse_file(self, filepath: str) -> List[WindowsEvent]:
-        """Parse a Windows Event XML export file."""
-        events = []
-        try:
-            tree = ET.parse(filepath)
-            root = tree.getroot()
 
-            for event_elem in root.iter():
-                if event_elem.tag.endswith('Event') or event_elem.tag == 'Event':
-                    parsed = self._parse_event_element(event_elem)
-                    if parsed:
-                        events.append(parsed)
-        except FileNotFoundError:
-            print(f"[ERROR] File not found: {filepath}", file=sys.stderr)
-            sys.exit(1)
-        except ET.ParseError as e:
-            print(f"[ERROR] XML parse error: {e}", file=sys.stderr)
-            sys.exit(1)
+def parse_event(elem: ET.Element) -> WindowsEvent | None:
+    system = _child(elem, "System")
+    if system is None:
+        return None
+    event_id = _child(system, "EventID")
+    created = _child(system, "TimeCreated")
+    computer = _child(system, "Computer")
+    if event_id is None or created is None or not (event_id.text or "").strip().isdigit():
+        return None
+    timestamp = datetime.fromisoformat(created.get("SystemTime", "").replace("Z", "+00:00"))
+    data = {}
+    event_data = _child(elem, "EventData")
+    if event_data is not None:
+        for item in event_data:
+            if item.get("Name"):
+                data[item.get("Name")] = (item.text or "").strip()
+    return WindowsEvent(int(event_id.text), timestamp, computer.text if computer is not None else "", data)
 
-        events.sort(key=lambda e: e.timestamp)
-        return events
 
-    def _parse_event_element(self, elem) -> Optional[WindowsEvent]:
-        """Parse a single Event XML element."""
-        try:
-            system = elem.find('.//System', self.ns) or elem.find('.//evt:System', self.ns)
-            event_data = elem.find('.//EventData', self.ns) or elem.find('.//evt:EventData', self.ns)
+def parse_xml(text: str) -> list[WindowsEvent]:
+    body = re.sub(r"^\s*<\?xml[^>]*\?>", "", text)
+    try:
+        root = ET.fromstring(body)  # noqa: S314 - exported logs from lab hosts, not untrusted input
+    except ET.ParseError:
+        # `wevtutil qe /f:xml` emits bare <Event> elements with no root element
+        root = ET.fromstring(f"<Events>{body}</Events>")  # noqa: S314
+    candidates = [root] if root.tag in (NS + "Event", "Event") else list(root)
+    events = [e for e in map(parse_event, candidates) if e is not None]
+    return sorted(events, key=lambda e: e.timestamp)
 
-            if system is None:
-                # Try without namespace
-                system = elem.find('System')
-                event_data = elem.find('EventData')
 
-            if system is None:
-                return None
+# --------------------------------------------------------------------------- #
+# Triage checks
+# --------------------------------------------------------------------------- #
 
-            event_id_elem = system.find('EventID') or system.find('evt:EventID', self.ns)
-            time_elem = system.find('TimeCreated') or system.find('evt:TimeCreated', self.ns)
-            computer_elem = system.find('Computer') or system.find('evt:Computer', self.ns)
 
-            if event_id_elem is None:
-                return None
+def summarise(event: WindowsEvent) -> dict:
+    keep = ("TargetUserName", "IpAddress", "LogonType", "ServiceName", "ImagePath", "SubjectUserName")
+    return {
+        "time": event.timestamp.isoformat(),
+        "event": f"{event.event_id} {event.name}",
+        **{k: event.get(k) for k in keep if event.get(k)},
+    }
 
-            event_id = int(event_id_elem.text)
-            timestamp = time_elem.get('SystemTime', '') if time_elem is not None else ''
-            computer = computer_elem.text if computer_elem is not None else 'unknown'
 
-            event = WindowsEvent(
-                event_id=event_id,
-                timestamp=timestamp,
-                computer=computer,
-                description=EVENT_DESCRIPTIONS.get(event_id, f"Event {event_id}")
+def detect_password_spraying(events: list[WindowsEvent], min_accounts: int = 5) -> list[Finding]:
+    accounts_by_source: dict[str, set[str]] = defaultdict(set)
+    evidence: dict[str, list[WindowsEvent]] = defaultdict(list)
+    for e in events:
+        if e.event_id == 4625 and e.get("IpAddress"):
+            accounts_by_source[e.get("IpAddress")].add(e.get("TargetUserName").lower())
+            evidence[e.get("IpAddress")].append(e)
+    return [
+        Finding(
+            "Password spraying",
+            "high",
+            "T1110.003",
+            f"{ip} failed logons for {len(users)} different accounts",
+            [summarise(e) for e in evidence[ip][:10]],
+        )
+        for ip, users in accounts_by_source.items()
+        if len(users) >= min_accounts
+    ]
+
+
+def detect_failed_logon_bursts(events: list[WindowsEvent], threshold: int = 10) -> list[Finding]:
+    by_user = Counter(e.get("TargetUserName") for e in events if e.event_id == 4625 and e.get("TargetUserName"))
+    findings = []
+    for user, count in by_user.items():
+        if count >= threshold:
+            severity = "critical" if count >= 50 else "high" if count >= 20 else "medium"
+            findings.append(
+                Finding("Failed logon burst", severity, "T1110.001", f"'{user}' failed to log on {count} times")
             )
-
-            # Parse EventData fields
-            if event_data is not None:
-                data_fields = {}
-                for data in event_data:
-                    name = data.get('Name', '')
-                    value = data.text or ''
-                    data_fields[name] = value
-
-                event.target_user = data_fields.get('TargetUserName', '')
-                event.target_domain = data_fields.get('TargetDomainName', '')
-                event.source_ip = data_fields.get('IpAddress', '')
-                event.logon_type = data_fields.get('LogonType', '')
-                event.logon_id = data_fields.get('TargetLogonId', '')
-                event.process_name = data_fields.get('NewProcessName', '')
-                event.command_line = data_fields.get('CommandLine', '')
-                event.service_name = data_fields.get('ServiceName', '')
-
-                if event.logon_type:
-                    event.logon_type_desc = LOGON_TYPES.get(event.logon_type, f"Type {event.logon_type}")
-
-            # Add MITRE mapping
-            if event_id in MITRE_MAPPINGS:
-                event.mitre_technique = MITRE_MAPPINGS[event_id]['technique']
-                event.mitre_tactic = MITRE_MAPPINGS[event_id]['tactic']
-
-            return event
-        except Exception:
-            return None
+    return findings
 
 
-class AnomalyDetector:
-    """Detects anomalies in Windows Security events."""
-
-    def __init__(self, business_hours: tuple = (8, 18)):
-        self.business_start = business_hours[0]
-        self.business_end = business_hours[1]
-
-    def detect_all(self, events: List[WindowsEvent]) -> List[AnomalyAlert]:
-        """Run all anomaly detection checks."""
-        anomalies = []
-        anomalies.extend(self._detect_off_hours_logons(events))
-        anomalies.extend(self._detect_failed_logon_spikes(events))
-        anomalies.extend(self._detect_privilege_escalation(events))
-        anomalies.extend(self._detect_suspicious_services(events))
-        anomalies.extend(self._detect_account_manipulation(events))
-        return anomalies
-
-    def _detect_off_hours_logons(self, events: List[WindowsEvent]) -> List[AnomalyAlert]:
-        """Detect interactive/RDP logons outside business hours."""
-        alerts = []
-        off_hours_logons = []
-
-        for event in events:
-            if event.event_id == 4624 and event.logon_type in ('2', '10'):
-                try:
-                    ts = datetime.fromisoformat(event.timestamp.replace('Z', '+00:00'))
-                    if ts.hour < self.business_start or ts.hour >= self.business_end:
-                        off_hours_logons.append(event)
-                except (ValueError, AttributeError):
-                    continue
-
-        if off_hours_logons:
-            alerts.append(AnomalyAlert(
-                alert_type="Off-Hours Interactive Logon",
-                severity="medium",
-                description=f"{len(off_hours_logons)} interactive/RDP logon(s) detected outside business hours ({self.business_start}:00-{self.business_end}:00)",
-                events=[asdict(e) for e in off_hours_logons[:10]],
-                mitre_technique="T1078",
-                recommendation="Verify these logons with the account owners. Investigate if unexpected."
-            ))
-
-        return alerts
-
-    def _detect_failed_logon_spikes(self, events: List[WindowsEvent]) -> List[AnomalyAlert]:
-        """Detect spikes in failed logon attempts."""
-        alerts = []
-        failed_by_user: Dict[str, int] = Counter()
-
-        for event in events:
-            if event.event_id == 4625 and event.target_user:
-                failed_by_user[event.target_user] += 1
-
-        for user, count in failed_by_user.items():
-            if count >= 10:
-                severity = "critical" if count >= 50 else "high" if count >= 20 else "medium"
-                alerts.append(AnomalyAlert(
-                    alert_type="Failed Logon Spike",
-                    severity=severity,
-                    description=f"Account '{user}' has {count} failed logon attempts",
-                    mitre_technique="T1110",
-                    recommendation="Investigate source IPs, check if account is targeted. Consider temporary lockout."
-                ))
-
-        return alerts
-
-    def _detect_privilege_escalation(self, events: List[WindowsEvent]) -> List[AnomalyAlert]:
-        """Detect potential privilege escalation chains."""
-        alerts = []
-        priv_events = [e for e in events if e.event_id == 4672]
-
-        if len(priv_events) > 20:
-            alerts.append(AnomalyAlert(
-                alert_type="Excessive Privilege Assignments",
-                severity="high",
-                description=f"{len(priv_events)} special privilege assignments detected",
-                events=[asdict(e) for e in priv_events[:5]],
-                mitre_technique="T1078",
-                recommendation="Review accounts receiving special privileges. Investigate any non-admin accounts."
-            ))
-
-        return alerts
-
-    def _detect_suspicious_services(self, events: List[WindowsEvent]) -> List[AnomalyAlert]:
-        """Detect suspicious service installations."""
-        alerts = []
-        for event in events:
-            if event.event_id in (4697, 7045) and event.service_name:
-                alerts.append(AnomalyAlert(
-                    alert_type="New Service Installation",
-                    severity="high",
-                    description=f"New service installed: {event.service_name}",
-                    events=[asdict(event)],
-                    mitre_technique="T1543.003",
-                    recommendation="Verify this service is legitimate and expected."
-                ))
-
-        return alerts
-
-    def _detect_account_manipulation(self, events: List[WindowsEvent]) -> List[AnomalyAlert]:
-        """Detect account creation and group modifications."""
-        alerts = []
-        for event in events:
-            if event.event_id == 4720:
-                alerts.append(AnomalyAlert(
-                    alert_type="User Account Created",
-                    severity="medium",
-                    description=f"New user account created: {event.target_user}",
-                    events=[asdict(event)],
-                    mitre_technique="T1136.001",
-                    recommendation="Verify this account creation was authorized."
-                ))
-
-        return alerts
+def detect_off_hours_logons(events: list[WindowsEvent], start: int, end: int, utc_offset: int) -> list[Finding]:
+    """Interactive / RDP logons outside business hours (hours in local time)."""
+    hits = [
+        e
+        for e in events
+        if e.event_id == 4624
+        and e.get("LogonType") in ("2", "10")
+        and not start <= (e.timestamp.hour + utc_offset) % 24 < end
+    ]
+    if not hits:
+        return []
+    return [
+        Finding(
+            "Off-hours interactive logon",
+            "medium",
+            "T1078",
+            f"{len(hits)} interactive/RDP logon(s) outside {start:02d}:00-{end:02d}:00",
+            [summarise(e) for e in hits[:10]],
+        )
+    ]
 
 
-def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="SOC Home Lab - Windows Event Log Parser and Anomaly Detector",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python windows_event_parser.py --file SecurityEvents.xml
-  python windows_event_parser.py --file events.xml --output report.json
-  python windows_event_parser.py --file events.xml --business-hours 9 17
-        """
+def detect_service_installs(events: list[WindowsEvent]) -> list[Finding]:
+    return [
+        Finding(
+            "Service installed",
+            "high",
+            "T1543.003",
+            f"Service '{e.get('ServiceName')}' -> {e.get('ImagePath') or e.get('ServiceFileName')}",
+            [summarise(e)],
+        )
+        for e in events
+        if e.event_id in (4697, 7045)
+    ]
+
+
+def detect_account_changes(events: list[WindowsEvent]) -> list[Finding]:
+    findings = []
+    for e in events:
+        if e.event_id == 4720:
+            findings.append(
+                Finding(
+                    "Account created",
+                    "medium",
+                    "T1136.001",
+                    f"'{e.get('TargetUserName')}' created by '{e.get('SubjectUserName')}'",
+                    [summarise(e)],
+                )
+            )
+        elif e.event_id == 4732 and e.get("TargetSid") == "S-1-5-32-544":
+            findings.append(
+                Finding(
+                    "Added to local Administrators",
+                    "high",
+                    "T1098",
+                    f"{e.get('MemberName') or e.get('MemberSid')} added by '{e.get('SubjectUserName')}'",
+                    [summarise(e)],
+                )
+            )
+    return findings
+
+
+def detect_log_clearing(events: list[WindowsEvent]) -> list[Finding]:
+    return [
+        Finding(
+            "Security log cleared", "critical", "T1685.005", f"cleared by '{e.get('SubjectUserName')}'", [summarise(e)]
+        )
+        for e in events
+        if e.event_id == 1102
+    ]
+
+
+def triage(events: list[WindowsEvent], business_hours=(8, 18), utc_offset: int = 0) -> list[Finding]:
+    findings = (
+        detect_password_spraying(events)
+        + detect_failed_logon_bursts(events)
+        + detect_off_hours_logons(events, *business_hours, utc_offset)
+        + detect_service_installs(events)
+        + detect_account_changes(events)
+        + detect_log_clearing(events)
     )
-    parser.add_argument('--file', '-f', required=True, help='Path to Windows Event XML export')
-    parser.add_argument('--output', '-o', help='Output file (default: stdout)')
-    parser.add_argument('--business-hours', nargs=2, type=int, default=[8, 18],
-                        metavar=('START', 'END'),
-                        help='Business hours range for off-hours detection (default: 8 18)')
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    return sorted(findings, key=lambda f: order[f.severity])
 
-    args = parser.parse_args()
 
-    # Parse events
-    print(f"[*] Parsing Windows Event log: {args.file}")
-    evt_parser = WindowsEventParser()
-    events = evt_parser.parse_file(args.file)
-    print(f"[*] Parsed {len(events)} events")
+def build_report(events: list[WindowsEvent], findings: list[Finding]) -> dict:
+    return {
+        "total_events": len(events),
+        "event_counts": {
+            f"{k} {EVENT_NAMES.get(k, '')}".strip(): v for k, v in Counter(e.event_id for e in events).most_common()
+        },
+        "time_range": [events[0].timestamp.isoformat(), events[-1].timestamp.isoformat()] if events else [],
+        "findings": [asdict(f) for f in findings],
+    }
 
-    # Detect anomalies
-    print("[*] Running anomaly detection...")
-    detector = AnomalyDetector(business_hours=tuple(args.business_hours))
-    anomalies = detector.detect_all(events)
-    print(f"[*] Found {len(anomalies)} anomalies")
 
-    # Build report
-    event_summary = Counter(e.event_id for e in events)
-    unique_users = len(set(e.target_user for e in events if e.target_user))
-    unique_ips = len(set(e.source_ip for e in events if e.source_ip and e.source_ip != '-'))
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Triage a Windows Security log XML export")
+    parser.add_argument("--file", "-f", required=True)
+    parser.add_argument("--output", "-o")
+    parser.add_argument("--business-hours", nargs=2, type=int, default=[8, 18], metavar=("START", "END"))
+    parser.add_argument("--utc-offset", type=int, default=0, help="local time offset from UTC in hours")
+    args = parser.parse_args(argv)
 
-    report = WindowsEventReport(
-        total_events=len(events),
-        event_summary=dict(event_summary.most_common()),
-        anomalies=[asdict(a) for a in anomalies],
-        unique_users=unique_users,
-        unique_source_ips=unique_ips,
-        suspicious_events=[asdict(e) for e in events if e.is_suspicious],
-        timeline=[{
-            "timestamp": e.timestamp,
-            "event_id": e.event_id,
-            "description": e.description,
-            "user": e.target_user,
-            "source_ip": e.source_ip
-        } for e in events[:100]]
-    )
+    try:
+        with open(args.file, encoding="utf-8-sig") as fh:
+            events = parse_xml(fh.read())
+    except (OSError, ET.ParseError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
 
-    # Output
-    output = json.dumps(asdict(report), indent=2, default=str)
+    report = build_report(events, triage(events, tuple(args.business_hours), args.utc_offset))
+    text = json.dumps(report, indent=2)
     if args.output:
-        with open(args.output, 'w') as f:
-            f.write(output)
-        print(f"[+] Report saved to: {args.output}")
+        with open(args.output, "w", encoding="utf-8") as fh:
+            fh.write(text)
     else:
-        print(output)
+        print(text)
+    return 0
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    sys.exit(main())

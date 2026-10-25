@@ -1,0 +1,10 @@
+# SOC Home Lab - Filebeat on the Suricata sensor: ship raw eve.json lines to
+# Logstash (elastic/logstash/pipeline/suricata.conf does the JSON parsing).
+filebeat.inputs:
+  - type: filestream
+    id: suricata-eve
+    paths:
+      - /var/log/suricata/eve.json
+
+output.logstash:
+  hosts: ["10.0.1.11:5046"]

@@ -1,352 +1,243 @@
 #!/usr/bin/env python3
 """
-SOC Home Lab - Log Analyzer Toolkit
-====================================
-Comprehensive log analysis tool for parsing auth.log/syslog files,
-detecting brute force patterns, and generating investigation reports.
+SOC Home Lab - SSH Authentication Log Analyzer
+==============================================
+Parses Linux auth.log (classic syslog or the RFC 3339 timestamps Ubuntu
+24.04+ writes by default), finds SSH brute-force sources using a sliding
+time window, and flags sources that logged in successfully after failing.
 
 Author: Omar Alraas
-Usage:  python log_analyzer.py --file /var/log/auth.log --threshold 5 --format table
+Usage:  python log_analyzer.py --file /var/log/auth.log --threshold 5 --timeframe 10
 """
 
-import re
-import json
+from __future__ import annotations
+
 import argparse
+import json
+import re
 import sys
 from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
-from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Optional, Tuple
+
+SYSLOG_LINE = re.compile(
+    r"^(?P<ts>\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\S+)\s+"
+    r"(?P<host>\S+)\s+(?P<program>[^\s\[:]+)(?:\[(?P<pid>\d+)\])?:\s+(?P<message>.*)$"
+)
+SSH_FAILED = re.compile(r"Failed (?:password|publickey) for (?:invalid user )?(\S+) from (\S+) port \d+")
+SSH_ACCEPTED = re.compile(r"Accepted (?:password|publickey|keyboard-interactive/pam) for (\S+) from (\S+) port \d+")
+# sshd logs "Invalid user" *and* "Failed password for invalid user" for one
+# attempt; the former is kept for username enumeration, not counted twice.
+SSH_INVALID_USER = re.compile(r"Invalid user (\S*) from (\S+)")
 
 
 @dataclass
 class LogEntry:
-    """Represents a single parsed log entry."""
-    timestamp: str
+    timestamp: datetime
     hostname: str
     program: str
-    pid: Optional[str]
     message: str
-    raw: str
-    source_ip: Optional[str] = None
-    username: Optional[str] = None
-    event_type: Optional[str] = None  # 'auth_success', 'auth_failure', 'other'
+    source_ip: str | None = None
+    username: str | None = None
+    event_type: str = "other"  # auth_failure | auth_success | invalid_user | other
 
 
 @dataclass
 class BruteForceAlert:
-    """Represents a detected brute force attempt."""
     source_ip: str
-    target_accounts: List[str]
     attempt_count: int
+    peak_window_count: int
+    target_accounts: list[str]
     first_seen: str
     last_seen: str
-    severity: str  # 'low', 'medium', 'high', 'critical'
+    severity: str
     successful_login: bool = False
+    compromised_accounts: list[str] = field(default_factory=list)
 
 
 @dataclass
 class AnalysisReport:
-    """Complete analysis report."""
     total_entries: int = 0
     total_auth_failures: int = 0
     total_auth_successes: int = 0
     unique_source_ips: int = 0
-    brute_force_alerts: List[BruteForceAlert] = field(default_factory=list)
-    top_source_ips: List[Tuple[str, int]] = field(default_factory=list)
-    top_targeted_accounts: List[Tuple[str, int]] = field(default_factory=list)
-    timeline: List[Dict] = field(default_factory=list)
-    analysis_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    top_source_ips: list[tuple[str, int]] = field(default_factory=list)
+    top_targeted_accounts: list[tuple[str, int]] = field(default_factory=list)
+    brute_force_alerts: list[BruteForceAlert] = field(default_factory=list)
+
+
+def parse_timestamp(raw: str, year: int) -> datetime:
+    if raw[0].isdigit():
+        return datetime.fromisoformat(raw).replace(tzinfo=None)
+    return datetime.strptime(f"{year} {' '.join(raw.split())}", "%Y %b %d %H:%M:%S")
 
 
 class LogParser:
-    """Parses syslog/auth.log format files."""
+    def __init__(self, year: int | None = None) -> None:
+        # classic syslog omits the year
+        self.year = year or datetime.now().year
 
-    SYSLOG_PATTERN = re.compile(
-        r'^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+'  # timestamp
-        r'(\S+)\s+'                                       # hostname
-        r'(\S+?)(?:\[(\d+)\])?:\s+'                       # program[pid]
-        r'(.+)$'                                          # message
-    )
-
-    SSH_FAILED_PATTERN = re.compile(
-        r'Failed (?:password|publickey) for (?:invalid user )?(\S+) from (\S+) port (\d+)'
-    )
-
-    SSH_SUCCESS_PATTERN = re.compile(
-        r'Accepted (?:password|publickey) for (\S+) from (\S+) port (\d+)'
-    )
-
-    SSH_INVALID_USER_PATTERN = re.compile(
-        r'Invalid user (\S+) from (\S+)'
-    )
-
-    def parse_line(self, line: str) -> Optional[LogEntry]:
-        """Parse a single syslog line into a LogEntry."""
-        line = line.strip()
-        if not line:
-            return None
-
-        match = self.SYSLOG_PATTERN.match(line)
+    def parse_line(self, line: str) -> LogEntry | None:
+        match = SYSLOG_LINE.match(line.strip())
         if not match:
             return None
-
-        entry = LogEntry(
-            timestamp=match.group(1),
-            hostname=match.group(2),
-            program=match.group(3),
-            pid=match.group(4),
-            message=match.group(5),
-            raw=line
-        )
-
-        # Classify SSH events
-        if entry.program in ('sshd', 'ssh'):
-            self._classify_ssh_event(entry)
-
+        try:
+            ts = parse_timestamp(match["ts"], self.year)
+        except ValueError:
+            return None
+        entry = LogEntry(ts, match["host"], match["program"], match["message"])
+        if entry.program == "sshd":
+            self._classify_ssh(entry)
         return entry
 
-    def _classify_ssh_event(self, entry: LogEntry) -> None:
-        """Classify SSH log events and extract relevant fields."""
-        # Check for failed authentication
-        failed_match = self.SSH_FAILED_PATTERN.search(entry.message)
-        if failed_match:
-            entry.username = failed_match.group(1)
-            entry.source_ip = failed_match.group(2)
-            entry.event_type = 'auth_failure'
-            return
+    @staticmethod
+    def _classify_ssh(entry: LogEntry) -> None:
+        for pattern, event_type in (
+            (SSH_FAILED, "auth_failure"),
+            (SSH_ACCEPTED, "auth_success"),
+            (SSH_INVALID_USER, "invalid_user"),
+        ):
+            m = pattern.search(entry.message)
+            if m:
+                entry.username, entry.source_ip, entry.event_type = m[1], m[2], event_type
+                return
 
-        # Check for successful authentication
-        success_match = self.SSH_SUCCESS_PATTERN.search(entry.message)
-        if success_match:
-            entry.username = success_match.group(1)
-            entry.source_ip = success_match.group(2)
-            entry.event_type = 'auth_success'
-            return
+    def parse_lines(self, lines) -> list[LogEntry]:
+        return [e for e in map(self.parse_line, lines) if e is not None]
 
-        # Check for invalid user
-        invalid_match = self.SSH_INVALID_USER_PATTERN.search(entry.message)
-        if invalid_match:
-            entry.username = invalid_match.group(1)
-            entry.source_ip = invalid_match.group(2)
-            entry.event_type = 'auth_failure'
-            return
 
-        entry.event_type = 'other'
+def peak_in_window(times: list[datetime], window: timedelta) -> int:
+    """Largest number of events inside any window of the given length."""
+    best, start = 0, 0
+    for end, t in enumerate(times):
+        while t - times[start] > window:
+            start += 1
+        best = max(best, end - start + 1)
+    return best
 
-    def parse_file(self, filepath: str) -> List[LogEntry]:
-        """Parse an entire log file."""
-        entries = []
-        try:
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                for line_num, line in enumerate(f, 1):
-                    entry = self.parse_line(line)
-                    if entry:
-                        entries.append(entry)
-        except FileNotFoundError:
-            print(f"[ERROR] File not found: {filepath}", file=sys.stderr)
-            sys.exit(1)
-        except PermissionError:
-            print(f"[ERROR] Permission denied: {filepath}", file=sys.stderr)
-            sys.exit(1)
 
-        return entries
+def severity_for(peak: int) -> str:
+    if peak >= 50:
+        return "critical"
+    if peak >= 20:
+        return "high"
+    if peak >= 10:
+        return "medium"
+    return "low"
 
 
 class BruteForceDetector:
-    """Detects brute force patterns in log entries."""
-
-    def __init__(self, threshold: int = 5, timeframe_minutes: int = 10):
+    def __init__(self, threshold: int = 5, timeframe_minutes: int = 10) -> None:
         self.threshold = threshold
-        self.timeframe = timedelta(minutes=timeframe_minutes)
+        self.window = timedelta(minutes=timeframe_minutes)
 
-    def detect(self, entries: List[LogEntry]) -> List[BruteForceAlert]:
-        """Analyze entries for brute force patterns."""
-        # Group failed attempts by source IP
-        ip_failures: Dict[str, List[LogEntry]] = defaultdict(list)
-        ip_successes: Dict[str, List[LogEntry]] = defaultdict(list)
-
-        for entry in entries:
-            if entry.source_ip:
-                if entry.event_type == 'auth_failure':
-                    ip_failures[entry.source_ip].append(entry)
-                elif entry.event_type == 'auth_success':
-                    ip_successes[entry.source_ip].append(entry)
+    def detect(self, entries: list[LogEntry]) -> list[BruteForceAlert]:
+        failures: dict[str, list[LogEntry]] = defaultdict(list)
+        successes: dict[str, list[LogEntry]] = defaultdict(list)
+        for e in entries:
+            if e.source_ip and e.event_type == "auth_failure":
+                failures[e.source_ip].append(e)
+            elif e.source_ip and e.event_type == "auth_success":
+                successes[e.source_ip].append(e)
 
         alerts = []
-        for ip, failures in ip_failures.items():
-            if len(failures) >= self.threshold:
-                target_accounts = list(set(
-                    e.username for e in failures if e.username
-                ))
-                count = len(failures)
-
-                # Determine severity
-                if count >= 50:
-                    severity = 'critical'
-                elif count >= 20:
-                    severity = 'high'
-                elif count >= 10:
-                    severity = 'medium'
-                else:
-                    severity = 'low'
-
-                # Check if there was a successful login after failures
-                has_success = ip in ip_successes
-
-                alert = BruteForceAlert(
+        for ip, fails in failures.items():
+            fails.sort(key=lambda e: e.timestamp)
+            peak = peak_in_window([e.timestamp for e in fails], self.window)
+            if peak < self.threshold:
+                continue
+            # only a success *after* the attack started indicates compromise
+            later = [s for s in successes.get(ip, []) if s.timestamp >= fails[0].timestamp]
+            alerts.append(
+                BruteForceAlert(
                     source_ip=ip,
-                    target_accounts=target_accounts,
-                    attempt_count=count,
-                    first_seen=failures[0].timestamp,
-                    last_seen=failures[-1].timestamp,
-                    severity=severity,
-                    successful_login=has_success
+                    attempt_count=len(fails),
+                    peak_window_count=peak,
+                    target_accounts=sorted({e.username for e in fails if e.username}),
+                    first_seen=fails[0].timestamp.isoformat(),
+                    last_seen=fails[-1].timestamp.isoformat(),
+                    severity="critical" if later else severity_for(peak),
+                    successful_login=bool(later),
+                    compromised_accounts=sorted({s.username for s in later if s.username}),
                 )
-                alerts.append(alert)
-
-        # Sort by attempt count descending
-        alerts.sort(key=lambda a: a.attempt_count, reverse=True)
-        return alerts
+            )
+        return sorted(alerts, key=lambda a: (not a.successful_login, -a.peak_window_count))
 
 
-class LogAnalyzer:
-    """Main analysis engine that coordinates parsing and detection."""
-
-    def __init__(self, threshold: int = 5, timeframe: int = 10):
-        self.parser = LogParser()
-        self.detector = BruteForceDetector(threshold=threshold, timeframe_minutes=timeframe)
-
-    def analyze(self, filepath: str) -> AnalysisReport:
-        """Run complete analysis on a log file."""
-        print(f"[*] Parsing log file: {filepath}")
-        entries = self.parser.parse_file(filepath)
-        print(f"[*] Parsed {len(entries)} log entries")
-
-        report = AnalysisReport(total_entries=len(entries))
-
-        # Count auth events
-        source_ips = Counter()
-        target_accounts = Counter()
-
-        for entry in entries:
-            if entry.event_type == 'auth_failure':
-                report.total_auth_failures += 1
-                if entry.source_ip:
-                    source_ips[entry.source_ip] += 1
-                if entry.username:
-                    target_accounts[entry.username] += 1
-            elif entry.event_type == 'auth_success':
-                report.total_auth_successes += 1
-
-        report.unique_source_ips = len(source_ips)
-        report.top_source_ips = source_ips.most_common(10)
-        report.top_targeted_accounts = target_accounts.most_common(10)
-
-        # Run brute force detection
-        print("[*] Running brute force detection...")
-        report.brute_force_alerts = self.detector.detect(entries)
-        print(f"[*] Detected {len(report.brute_force_alerts)} brute force alerts")
-
-        return report
+def analyze(entries: list[LogEntry], threshold: int, timeframe: int) -> AnalysisReport:
+    report = AnalysisReport(total_entries=len(entries))
+    sources, accounts = Counter(), Counter()
+    for e in entries:
+        if e.event_type == "auth_failure":
+            report.total_auth_failures += 1
+            sources[e.source_ip] += 1
+            accounts[e.username] += 1
+        elif e.event_type == "auth_success":
+            report.total_auth_successes += 1
+    report.unique_source_ips = len(sources)
+    report.top_source_ips = sources.most_common(10)
+    report.top_targeted_accounts = accounts.most_common(10)
+    report.brute_force_alerts = BruteForceDetector(threshold, timeframe).detect(entries)
+    return report
 
 
 def format_table(report: AnalysisReport) -> str:
-    """Format the analysis report as a readable table."""
-    lines = []
-    lines.append("=" * 70)
-    lines.append("  SOC HOME LAB - LOG ANALYSIS REPORT")
-    lines.append(f"  Generated: {report.analysis_timestamp}")
-    lines.append("=" * 70)
-
-    # Summary
-    lines.append(f"\n  Total Entries Analyzed:    {report.total_entries}")
-    lines.append(f"  Authentication Failures:  {report.total_auth_failures}")
-    lines.append(f"  Authentication Successes: {report.total_auth_successes}")
-    lines.append(f"  Unique Source IPs:        {report.unique_source_ips}")
-
-    # Top Source IPs
+    lines = [
+        "=" * 70,
+        "  SSH AUTHENTICATION ANALYSIS",
+        "=" * 70,
+        f"  Entries parsed:          {report.total_entries}",
+        f"  Authentication failures: {report.total_auth_failures}",
+        f"  Authentication successes: {report.total_auth_successes}",
+        f"  Unique failing sources:  {report.unique_source_ips}",
+    ]
     if report.top_source_ips:
-        lines.append(f"\n  {'TOP SOURCE IPs':^50}")
-        lines.append(f"  {'IP Address':<25} {'Attempts':>10}")
-        lines.append("  " + "-" * 35)
-        for ip, count in report.top_source_ips:
-            lines.append(f"  {ip:<25} {count:>10}")
-
-    # Top Targeted Accounts
-    if report.top_targeted_accounts:
-        lines.append(f"\n  {'TOP TARGETED ACCOUNTS':^50}")
-        lines.append(f"  {'Account':<25} {'Attempts':>10}")
-        lines.append("  " + "-" * 35)
-        for account, count in report.top_targeted_accounts:
-            lines.append(f"  {account:<25} {count:>10}")
-
-    # Brute Force Alerts
-    if report.brute_force_alerts:
-        lines.append(f"\n  {'BRUTE FORCE ALERTS':^50}")
-        lines.append("  " + "-" * 65)
-        for alert in report.brute_force_alerts:
-            marker = " [COMPROMISED!]" if alert.successful_login else ""
-            lines.append(f"\n  [{alert.severity.upper()}]{marker}")
-            lines.append(f"    Source IP:  {alert.source_ip}")
-            lines.append(f"    Attempts:  {alert.attempt_count}")
-            lines.append(f"    Targets:   {', '.join(alert.target_accounts[:5])}")
-            lines.append(f"    First:     {alert.first_seen}")
-            lines.append(f"    Last:      {alert.last_seen}")
-    else:
-        lines.append("\n  No brute force alerts detected.")
-
-    lines.append("\n" + "=" * 70)
-    return "\n".join(lines)
+        lines += ["", f"  {'Top failing source':<25}{'Failures':>10}"]
+        lines += [f"  {ip:<25}{n:>10}" for ip, n in report.top_source_ips]
+    if not report.brute_force_alerts:
+        lines += ["", "  No brute-force sources above threshold."]
+    for a in report.brute_force_alerts:
+        flag = f"  COMPROMISED: {', '.join(a.compromised_accounts)}" if a.successful_login else ""
+        lines += [
+            "",
+            f"  [{a.severity.upper()}] {a.source_ip}{flag}",
+            f"    failures: {a.attempt_count} total, {a.peak_window_count} peak in window",
+            f"    accounts: {', '.join(a.target_accounts[:8])}",
+            f"    seen:     {a.first_seen} -> {a.last_seen}",
+        ]
+    return "\n".join(lines + ["=" * 70])
 
 
-def format_json(report: AnalysisReport) -> str:
-    """Format the analysis report as JSON."""
-    data = asdict(report)
-    return json.dumps(data, indent=2, default=str)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Detect SSH brute force in auth.log")
+    parser.add_argument("--file", "-f", required=True, help="auth.log to analyse ('-' for stdin)")
+    parser.add_argument("--threshold", "-t", type=int, default=5, help="failures within the window (default 5)")
+    parser.add_argument("--timeframe", type=int, default=10, help="sliding window in minutes (default 10)")
+    parser.add_argument("--year", type=int, help="year for classic syslog timestamps (default: current)")
+    parser.add_argument("--format", choices=["table", "json"], default="table")
+    parser.add_argument("--output", "-o", help="write the report to this file")
+    args = parser.parse_args(argv)
 
+    log_parser = LogParser(args.year)
+    try:
+        if args.file == "-":
+            entries = log_parser.parse_lines(sys.stdin)
+        else:
+            with open(args.file, encoding="utf-8", errors="replace") as fh:
+                entries = log_parser.parse_lines(fh)
+    except OSError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
 
-def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="SOC Home Lab - Log Analyzer: Detect brute force attacks in auth logs",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python log_analyzer.py --file /var/log/auth.log
-  python log_analyzer.py --file /var/log/auth.log --threshold 10 --format json
-  python log_analyzer.py --file auth.log --threshold 3 --output report.json --format json
-        """
-    )
-    parser.add_argument('--file', '-f', required=True, help='Path to log file to analyze')
-    parser.add_argument('--threshold', '-t', type=int, default=5,
-                        help='Minimum failed attempts to trigger brute force alert (default: 5)')
-    parser.add_argument('--timeframe', type=int, default=10,
-                        help='Timeframe in minutes for brute force detection (default: 10)')
-    parser.add_argument('--format', choices=['table', 'json'], default='table',
-                        help='Output format (default: table)')
-    parser.add_argument('--output', '-o', help='Output file path (default: stdout)')
-
-    args = parser.parse_args()
-
-    # Run analysis
-    analyzer = LogAnalyzer(threshold=args.threshold, timeframe=args.timeframe)
-    report = analyzer.analyze(args.file)
-
-    # Format output
-    if args.format == 'json':
-        output = format_json(report)
-    else:
-        output = format_table(report)
-
-    # Write output
+    report = analyze(entries, args.threshold, args.timeframe)
+    text = json.dumps(asdict(report), indent=2) if args.format == "json" else format_table(report)
     if args.output:
-        with open(args.output, 'w') as f:
-            f.write(output)
-        print(f"[+] Report saved to: {args.output}")
+        with open(args.output, "w", encoding="utf-8") as fh:
+            fh.write(text)
     else:
-        print(output)
+        print(text)
+    return 2 if any(a.successful_login for a in report.brute_force_alerts) else 0
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    sys.exit(main())

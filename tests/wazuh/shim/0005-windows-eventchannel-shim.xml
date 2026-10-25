@@ -1,0 +1,23 @@
+<!--
+  TEST-ONLY decoder. Never deploy this to a real manager.
+
+  wazuh-logtest always submits events through the localfile queue, so it can
+  never reach the built-in EventChannel decoder (DecodeWinevt), which only runs
+  for events that agents ship on the Windows event queue. Rules that depend on
+  `decoded_as windows_eventchannel` (the entire Windows/Sysmon ruleset) are
+  therefore untestable with stock logtest.
+
+  This shim registers a decoder with the same name that JSON-decodes the
+  *post-decoding* structure DecodeWinevt emits: {"win": {"system": {...},
+  "eventdata": {...}}}. Rules then see exactly the field names they see in
+  production (win.system.eventID, win.eventdata.commandLine, ...).
+
+  The file is mounted as ruleset/decoders/0005-* so it loads before the
+  generic JSON decoder in 0006-json_decoders.xml. <type>ossec</type> mirrors
+  the built-in decoder; the Windows base rule 60000 requires category "ossec".
+-->
+<decoder name="windows_eventchannel">
+  <type>ossec</type>
+  <prematch>^{"win":</prematch>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>

@@ -1,0 +1,190 @@
+# Test cases for wazuh/rules/custom-lateral-movement.xml
+
+cases:
+  # ------------------------------------------------------------ 100150
+  - name: PsExec against a remote host fires 100150
+    events:
+      - sysmon: 1
+        image: C:\Tools\PsExec64.exe
+        originalFileName: psexec.c
+        commandLine: PsExec64.exe -accepteula \\WIN10-B -s cmd.exe
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "100150"
+
+  - name: PsExec used locally (-s for a SYSTEM shell) is not lateral movement
+    events:
+      - sysmon: 1
+        image: C:\Tools\PsExec64.exe
+        originalFileName: psexec.c
+        commandLine: PsExec64.exe -accepteula -s -i C:\Windows\System32\cmd.exe
+        parentImage: C:\Windows\System32\cmd.exe
+    expect_not: "100150"
+
+  # ------------------------------------------------------------ 100151
+  - name: process spawned by PSEXESVC fires 100151
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\cmd.exe
+        commandLine: cmd.exe
+        parentImage: C:\Windows\PSEXESVC.exe
+    expect: "100151"
+
+  - name: cmd spawned by explorer is normal
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\cmd.exe
+        commandLine: cmd.exe
+        parentImage: C:\Windows\explorer.exe
+    expect_not: "100151"
+
+  # ------------------------------------------------------------ 100152
+  - name: Impacket smbexec-style service fires 100152
+    events:
+      - system: 7045
+        serviceName: BTOBTO
+        imagePath: '%COMSPEC% /Q /c echo cd ^> \\127.0.0.1\C$\__output 2^>^&1 > %TEMP%\execute.bat & %COMSPEC% /Q /c %TEMP%\execute.bat & del %TEMP%\execute.bat'
+        serviceType: user mode service
+        startType: demand start
+        accountName: LocalSystem
+    expect: "100152"
+
+  - name: a vendor service in Program Files is benign
+    events:
+      - system: 7045
+        serviceName: MozillaMaintenance
+        imagePath: '"C:\Program Files (x86)\Mozilla Maintenance Service\maintenanceservice.exe"'
+        serviceType: user mode service
+        startType: demand start
+        accountName: LocalSystem
+    expect_not: "100152"
+
+  # ------------------------------------------------------------ 100153
+  - name: wmic remote process call create fires 100153
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\wbem\WMIC.exe
+        commandLine: wmic.exe /node:10.0.0.51 process call create "cmd.exe /c whoami > C:\Windows\Temp\o.txt"
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "100153"
+
+  - name: local wmic process listing is benign
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\wbem\WMIC.exe
+        commandLine: wmic.exe process list brief
+        parentImage: C:\Windows\System32\cmd.exe
+    expect_not: "100153"
+
+  # ------------------------------------------------------------ 100154
+  - name: WmiPrvSE spawning cmd (wmiexec target side) fires 100154
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\cmd.exe
+        commandLine: cmd.exe /Q /c whoami 1> \\127.0.0.1\ADMIN$\__1698765 2>&1
+        parentImage: C:\Windows\System32\wbem\WmiPrvSE.exe
+    expect: "100154"
+
+  - name: WmiPrvSE spawning msiexec (software inventory) does not fire
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\msiexec.exe
+        commandLine: msiexec.exe /V
+        parentImage: C:\Windows\System32\wbem\WmiPrvSE.exe
+    expect_not: "100154"
+
+  # ------------------------------------------------------------ 100155
+  - name: Enter-PSSession to a remote host fires 100155
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        commandLine: powershell.exe Enter-PSSession -ComputerName WIN10-B -Credential lab\admin
+        parentImage: C:\Windows\explorer.exe
+    expect: "100155"
+
+  - name: listing existing PSSessions is benign
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        commandLine: powershell.exe Get-PSSession
+        parentImage: C:\Windows\explorer.exe
+    expect_not: "100155"
+
+  # ------------------------------------------------------------ 100156
+  - name: whoami spawned inside a WinRM session fires 100156
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\whoami.exe
+        commandLine: '"C:\Windows\system32\whoami.exe" /all'
+        parentImage: C:\Windows\System32\wsmprovhost.exe
+    expect: "100156"
+
+  - name: whoami from an interactive shell does not fire
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\whoami.exe
+        commandLine: whoami.exe
+        parentImage: C:\Windows\System32\cmd.exe
+    expect_not: "100156"
+
+  # ------------------------------------------------------------ 100157
+  - name: type 9 seclogo logon (pass-the-hash pattern) fires 100157
+    events:
+      - security: 4624
+        targetUserName: jdoe
+        logonType: 9
+        logonProcessName: seclogo
+        authenticationPackageName: Negotiate
+        ipAddress: "::1"
+    expect: "100157"
+
+  - name: an interactive logon is not pass-the-hash
+    events:
+      - security: 4624
+        targetUserName: jdoe
+        logonType: 2
+        logonProcessName: User32
+        authenticationPackageName: Negotiate
+        ipAddress: 127.0.0.1
+    expect_not: "100157"
+
+  # ------------------------------------------------------------ 100159
+  - name: remote ADMIN$ access fires 100159
+    events:
+      - security: 5140
+        shareName: \\*\ADMIN$
+        ipAddress: 10.0.0.60
+        subjectUserName: admin
+    expect: "100159"
+
+  - name: IPC$ access (constant background noise) does not fire
+    events:
+      - security: 5140
+        shareName: \\*\IPC$
+        ipAddress: 10.0.0.60
+        subjectUserName: admin
+    expect_not: "100159"
+
+  - name: ADMIN$ accessed from the host itself does not fire
+    events:
+      - security: 5140
+        shareName: \\*\ADMIN$
+        ipAddress: 127.0.0.1
+        subjectUserName: SYSTEM
+    expect_not: "100159"
+
+  # ------------------------------------------------------------ 100160
+  - name: schtasks /create /s against a remote host fires 100160
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\schtasks.exe
+        commandLine: schtasks.exe /create /s 10.0.0.51 /tn upd /tr C:\Users\Public\a.exe /sc once /st 00:00 /ru SYSTEM
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "100160"
+
+  - name: a local scheduled task is not lateral movement
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\schtasks.exe
+        commandLine: schtasks.exe /create /tn Backup /tr C:\Scripts\backup.bat /sc daily /st 02:00
+        parentImage: C:\Windows\System32\cmd.exe
+    expect_not: "100160"

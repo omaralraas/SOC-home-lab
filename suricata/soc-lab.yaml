@@ -1,0 +1,66 @@
+%YAML 1.1
+---
+# SOC Home Lab - Suricata 8 overlay
+#
+# Layered on top of the stock suricata.yaml with --include, so only lab
+# specifics live here and version upgrades keep the vendor defaults:
+#
+#   suricata -c /etc/suricata/suricata.yaml --include /etc/suricata/soc-lab.yaml -i eth1
+#
+# CI validates this overlay with `suricata -T` and replays test PCAPs through
+# it (tests/suricata).
+
+vars:
+  address-groups:
+    # Corporate + SOC VLANs. The attacker VLAN (10.0.2.0/24) is deliberately
+    # outside HOME_NET so simulated attacks hit $EXTERNAL_NET -> $HOME_NET rules.
+    HOME_NET: "[10.0.0.0/24,10.0.1.0/24]"
+    EXTERNAL_NET: "!$HOME_NET"
+    HTTP_SERVERS: "[10.0.0.51]"
+    DNS_SERVERS: "[10.0.0.1]"
+  port-groups:
+    HTTP_PORTS: "80"
+
+# SPAN port of the corporate VLAN
+af-packet:
+  - interface: eth1
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+    use-mmap: yes
+    tpacket-v3: yes
+
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+      # community-id lets analysts pivot between Suricata, Zeek and firewall logs
+      community-id: true
+      types:
+        - alert:
+            payload-printable: yes
+            metadata: yes
+        - anomaly:
+            enabled: yes
+        - http:
+            extended: yes
+        - dns
+        - tls:
+            extended: yes
+        - smb
+        - ftp
+        - flow
+  - fast:
+      enabled: yes
+      filename: fast.log
+      append: yes
+
+# ET Open (managed by suricata-update) plus the lab's own signatures
+default-rule-path: /var/lib/suricata/rules
+rule-files:
+  - suricata.rules
+  - /etc/suricata/rules/custom-emerging-threats.rules
+  - /etc/suricata/rules/custom-network-anomalies.rules
+
+threshold-file: /etc/suricata/threshold.config

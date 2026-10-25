@@ -1,0 +1,217 @@
+"""Build the MITRE ATT&CK coverage report from the detection content itself.
+
+    python -m tools.attack_coverage            # write docs/mitre-coverage.md + the Navigator layer
+    python -m tools.attack_coverage --check    # exit 1 if either file is stale (CI)
+
+Technique IDs are collected from every engine (Wazuh <mitre> blocks, Sigma
+tags, Suricata metadata, YARA meta), validated against the ATT&CK release
+that pySigma ships, and rolled up per tactic. Nothing is typed in by hand,
+so the report cannot drift from the rules.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import xml.etree.ElementTree as ET  # noqa: S405 - parses this repository's own rule files
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+
+import yara
+from sigma.data import mitre_attack
+from sigma.rule import SigmaRule
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+REPORT = REPO_ROOT / "docs" / "mitre-coverage.md"
+LAYER = REPO_ROOT / "docs" / "attack-navigator-layer.json"
+
+TACTIC_ORDER = [
+    "reconnaissance", "resource-development", "initial-access", "execution", "persistence",
+    "privilege-escalation", "stealth", "defense-impairment", "credential-access", "discovery",
+    "lateral-movement", "collection", "command-and-control", "exfiltration", "impact",
+]  # fmt: skip
+
+
+@dataclass(frozen=True)
+class Detection:
+    engine: str
+    rule_id: str
+    name: str
+    technique: str
+
+
+def wazuh_detections() -> list[Detection]:
+    found = []
+    for path in sorted((REPO_ROOT / "wazuh" / "rules").glob("*.xml")):
+        root = ET.fromstring(f"<root>{path.read_text(encoding='utf-8')}</root>")  # noqa: S314
+        for rule in root.iter("rule"):
+            for tid in rule.iterfind("mitre/id"):
+                found.append(Detection("Wazuh", rule.get("id"), rule.findtext("description", "").strip(), tid.text))
+    return found
+
+
+def sigma_detections() -> list[Detection]:
+    found = []
+    for path in sorted((REPO_ROOT / "detection-rules" / "sigma").rglob("*.yml")):
+        rule = SigmaRule.from_yaml(path.read_text(encoding="utf-8"))
+        for tag in rule.tags:
+            if tag.namespace == "attack" and re.fullmatch(r"t\d{4}(\.\d{3})?", tag.name):
+                found.append(Detection("Sigma", path.stem, rule.title, tag.name.upper()))
+    return found
+
+
+def suricata_detections() -> list[Detection]:
+    found = []
+    for path in sorted((REPO_ROOT / "suricata" / "rules").glob("*.rules")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            sid = re.search(r"\bsid:(\d+);", line)
+            tid = re.search(r"mitre_technique_id (T\d{4}(?:\.\d{3})?)", line)
+            if line.startswith("alert") and sid and tid:
+                msg = re.search(r'msg:"SOC-LAB ([^"]+)"', line)
+                found.append(Detection("Suricata", sid[1], msg[1] if msg else "", tid[1]))
+    return found
+
+
+def yara_detections() -> list[Detection]:
+    found = []
+    for path in sorted((REPO_ROOT / "detection-rules" / "yara").glob("*.yar")):
+        for rule in yara.compile(filepath=str(path)):
+            meta = rule.meta
+            found.append(Detection("YARA", rule.identifier, meta.get("description", ""), meta["mitre_attack"]))
+    return found
+
+
+def collect() -> list[Detection]:
+    return wazuh_detections() + sigma_detections() + suricata_detections() + yara_detections()
+
+
+def validate(detections: list[Detection]) -> list[str]:
+    known = mitre_attack.mitre_attack_techniques
+    return sorted({f"{d.engine} {d.rule_id}: {d.technique}" for d in detections if d.technique not in known})
+
+
+def _parent(technique: str) -> str:
+    return technique.split(".")[0]
+
+
+def by_technique(detections: list[Detection]) -> dict[str, list[Detection]]:
+    grouped: dict[str, list[Detection]] = defaultdict(list)
+    for d in detections:
+        grouped[d.technique].append(d)
+    return dict(sorted(grouped.items()))
+
+
+def tactic_rollup(techniques: set[str]) -> list[tuple[str, int, int]]:
+    """(tactic, parent techniques covered, parent techniques in ATT&CK) per tactic."""
+    mapping = mitre_attack.mitre_attack_techniques_tactics_mapping
+    totals: dict[str, set[str]] = defaultdict(set)
+    for tid, tactics in mapping.items():
+        for tactic in tactics:
+            totals[tactic].add(_parent(tid))
+    covered: dict[str, set[str]] = defaultdict(set)
+    for tid in techniques:
+        for tactic in mapping.get(tid, []):
+            covered[tactic].add(_parent(tid))
+    return [(t, len(covered[t]), len(totals[t])) for t in TACTIC_ORDER if t in totals]
+
+
+def render_layer(grouped: dict[str, list[Detection]]) -> str:
+    attack_version = str(int(float(mitre_attack.mitre_attack_version)))
+    layer = {
+        "name": "SOC Home Lab detections",
+        "versions": {"attack": attack_version, "navigator": "5.1.0", "layer": "4.5"},
+        "domain": "enterprise-attack",
+        "description": "Generated by tools/attack_coverage.py. Score = number of detections mapped to the technique.",
+        "sorting": 3,
+        "layout": {"layout": "side", "showName": True, "showID": True},
+        "hideDisabled": False,
+        "techniques": [
+            {
+                "techniqueID": tid,
+                "score": len(dets),
+                "comment": "; ".join(f"{d.engine} {d.rule_id}" for d in dets),
+                "enabled": True,
+                "showSubtechniques": True,
+            }
+            for tid, dets in grouped.items()
+        ],
+        "gradient": {"colors": ["#d6e4f0ff", "#2b6cb0ff"], "minValue": 1, "maxValue": 6},
+        "legendItems": [],
+        "showTacticRowBackground": True,
+        "selectTechniquesAcrossTactics": True,
+    }
+    return json.dumps(layer, indent=2) + "\n"
+
+
+def render_report(detections: list[Detection]) -> str:
+    grouped = by_technique(detections)
+    names = mitre_attack.mitre_attack_techniques
+    engines = defaultdict(set)
+    for d in detections:
+        engines[d.engine].add(d.rule_id)
+    version = mitre_attack.mitre_attack_version
+    out = [
+        "# MITRE ATT&CK Coverage",
+        "",
+        "<!-- Generated by `python -m tools.attack_coverage`. Do not edit by hand. -->",
+        "",
+        f"Built from the rule files themselves and validated against **ATT&CK v{version}**. Load",
+        "[`attack-navigator-layer.json`](attack-navigator-layer.json) in the",
+        "[ATT&CK Navigator](https://mitre-attack.github.io/attack-navigator/) (Open Existing Layer ->",
+        "Upload from local) for the heat map.",
+        "",
+        "| Engine | Rules mapped to ATT&CK |",
+        "|---|---|",
+        *[f"| {e} | {len(ids)} |" for e, ids in sorted(engines.items())],
+        "",
+        "## Coverage by tactic",
+        "",
+        "A technique counts as covered when at least one rule maps to it or to one of its",
+        "sub-techniques. Denominators are the parent techniques ATT&CK lists under each tactic",
+        "(a technique can belong to several tactics).",
+        "",
+        "| Tactic | Covered | ATT&CK techniques | Coverage |",
+        "|---|---|---|---|",
+    ]
+    for tactic, covered, total in tactic_rollup(set(grouped)):
+        out.append(f"| {tactic.replace('-', ' ').title()} | {covered} | {total} | {covered / total:.0%} |")
+    out += [
+        "",
+        "## Techniques and the rules that detect them",
+        "",
+        "| Technique | Name | Detections |",
+        "|---|---|---|",
+    ]
+    for tid, dets in grouped.items():
+        cells = ", ".join(sorted({f"{d.engine} `{d.rule_id}`" for d in dets}))
+        url = f"https://attack.mitre.org/techniques/{tid.replace('.', '/')}/"
+        out.append(f"| [{tid}]({url}) | {names[tid]} | {cells} |")
+    return "\n".join(out) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--check", action="store_true", help="fail if the generated files are out of date")
+    args = parser.parse_args(argv)
+    detections = collect()
+    invalid = validate(detections)
+    if invalid:
+        print("Technique IDs not in ATT&CK:\n  " + "\n  ".join(invalid), file=sys.stderr)
+        return 1
+    outputs = {REPORT: render_report(detections), LAYER: render_layer(by_technique(detections))}
+    if args.check:
+        stale = [p for p, text in outputs.items() if not p.exists() or p.read_text(encoding="utf-8") != text]
+        for p in stale:
+            print(f"{p.relative_to(REPO_ROOT)} is stale: run python -m tools.attack_coverage", file=sys.stderr)
+        return 1 if stale else 0
+    for path, text in outputs.items():
+        path.write_text(text, encoding="utf-8", newline="\n")
+        print(f"wrote {path.relative_to(REPO_ROOT)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

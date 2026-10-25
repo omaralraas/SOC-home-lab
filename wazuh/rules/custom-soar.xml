@@ -1,0 +1,38 @@
+<!--
+  SOC Home Lab - SOAR Audit Trail Rules
+  Author:   Omar Alraas
+  Rule IDs: 100190-100199
+  Tests:    tests/wazuh/cases/soar_and_regressions.yml
+
+  The SOAR engine (scripts/automation) writes one JSON line per response
+  action to /var/log/soar/actions.json, which the agent on the SOAR host ships
+  to the manager. The stock JSON decoder handles the format, so no custom
+  decoder is needed. This closes the loop: every automated action is itself
+  an auditable SIEM event, and a failed action raises an alert.
+-->
+<group name="soar,">
+
+  <rule id="100190" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="soar.action">\.+</field>
+    <field name="soar.status">\.+</field>
+    <description>SOAR: $(soar.action) on $(soar.target) is $(soar.status) (triggered by rule $(soar.rule_id))</description>
+    <group>soar_action,</group>
+  </rule>
+
+  <rule id="100191" level="10">
+    <if_sid>100190</if_sid>
+    <field name="soar.status">^failed$</field>
+    <description>SOAR automated response FAILED: $(soar.action) on $(soar.target): $(soar.error)</description>
+    <group>soar_action,soar_failure,</group>
+  </rule>
+
+  <rule id="100192" level="6">
+    <if_sid>100190</if_sid>
+    <field name="soar.action">^block_ip$</field>
+    <field name="soar.status">^executed$</field>
+    <description>SOAR blocked $(soar.target) at the firewall (triggered by rule $(soar.rule_id))</description>
+    <group>soar_action,soar_containment,</group>
+  </rule>
+
+</group>

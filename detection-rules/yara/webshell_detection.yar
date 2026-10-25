@@ -1,109 +1,123 @@
 /*
-  SOC Home Lab - YARA Rules: Web Shell Detection
+  SOC Home Lab - YARA Rules: Web Shells (PHP, ASPX, JSP)
   Author: Omar Alraas
-  Description: Detection rules for common web shell patterns across PHP, ASP, JSP
+  Tests:  tests/yara
+
+  Generic rules require attacker-controlled input or a decode chain to reach
+  an eval / command-execution sink inside a server-side script, which is what
+  separates a web shell from ordinary code that happens to call exec().
+  Wazuh FIM watches /var/www (wazuh/shared/agent.conf), so new or changed
+  files there can be scanned with these rules during triage.
 */
 
 rule WebShell_PHP_Generic
 {
     meta:
-        description = "Detects common PHP web shell patterns"
+        description = "PHP that feeds request input or a decoded blob into eval/assert, or request input into a command sink"
         author = "Omar Alraas"
+        date = "2025-01-20"
+        modified = "2026-10-25"
         severity = "critical"
         mitre_attack = "T1505.003"
-        date = "2025-01-20"
 
     strings:
-        $php_tag = "<?php" ascii nocase
-        $eval = "eval(" ascii nocase
-        $base64 = "base64_decode(" ascii nocase
-        $system = "system(" ascii nocase
-        $exec = "exec(" ascii nocase
-        $passthru = "passthru(" ascii nocase
-        $shell_exec = "shell_exec(" ascii nocase
-        $popen = "popen(" ascii nocase
-        $proc_open = "proc_open(" ascii nocase
-        $assert = "assert(" ascii nocase
-        $preg_replace = "preg_replace" ascii nocase
-        $create_function = "create_function" ascii nocase
-        $gzinflate = "gzinflate(" ascii nocase
-        $str_rot13 = "str_rot13(" ascii nocase
+        $php1 = "<?php" ascii nocase
+        $php2 = "<?=" ascii
+        $in1 = "$_POST" ascii
+        $in2 = "$_GET" ascii
+        $in3 = "$_REQUEST" ascii
+        $in4 = "$_COOKIE" ascii
+        $in5 = "php://input" ascii
+        $eval1 = /\beval\s*\(/ ascii nocase
+        $eval2 = /\bassert\s*\(/ ascii nocase
+        $eval3 = /\bcreate_function\s*\(/ ascii nocase
+        $dec1 = "base64_decode(" ascii nocase
+        $dec2 = "gzinflate(" ascii nocase
+        $dec3 = "str_rot13(" ascii nocase
+        $dec4 = "gzuncompress(" ascii nocase
+        $cmd1 = /\bsystem\s*\(/ ascii nocase
+        $cmd2 = /\bpassthru\s*\(/ ascii nocase
+        $cmd3 = /\bshell_exec\s*\(/ ascii nocase
+        $cmd4 = /\bpopen\s*\(/ ascii nocase
+        $cmd5 = /\bproc_open\s*\(/ ascii nocase
+        $cmd6 = /\bpcntl_exec\s*\(/ ascii nocase
 
     condition:
-        $php_tag and (
-            ($eval and $base64) or
-            ($eval and ($gzinflate or $str_rot13)) or
-            (3 of ($system, $exec, $passthru, $shell_exec, $popen, $proc_open)) or
-            ($assert and $base64) or
-            ($create_function and $base64)
+        1 of ($php*) and filesize < 1MB and (
+            (1 of ($eval*) and (1 of ($in*) or 1 of ($dec*))) or
+            (1 of ($cmd*) and 1 of ($in*))
         )
 }
 
-rule WebShell_PHP_Known_Signatures
+rule WebShell_Known_Families
 {
     meta:
-        description = "Detects known PHP web shell signatures (c99, r57, etc.)"
+        description = "Markers of well-known PHP web shell families (c99, r57, b374k, WSO)"
         author = "Omar Alraas"
+        date = "2025-01-20"
+        modified = "2026-10-25"
         severity = "critical"
         mitre_attack = "T1505.003"
-        date = "2025-01-20"
 
     strings:
+        $php = "<?php" ascii nocase
         $c99_1 = "c99shell" ascii nocase
         $c99_2 = "c99_buff_prepare" ascii nocase
         $r57_1 = "r57shell" ascii nocase
         $r57_2 = "r57_get_file" ascii nocase
-        $wso = "WSO" ascii
         $b374k = "b374k" ascii nocase
-        $china_chopper = "eval(Request" ascii nocase
-        $weevely = "weevely" ascii nocase
+        $wso = "FilesMan" ascii
 
     condition:
-        any of them
+        $php and filesize < 2MB and any of ($c99*, $r57*, $b374k, $wso)
 }
 
 rule WebShell_ASPX_Generic
 {
     meta:
-        description = "Detects common ASPX web shell patterns"
+        description = "ASP.NET page that runs commands or compiles code from request input (incl. China Chopper)"
         author = "Omar Alraas"
+        date = "2025-01-20"
+        modified = "2026-10-25"
         severity = "critical"
         mitre_attack = "T1505.003"
-        date = "2025-01-20"
 
     strings:
-        $aspx_tag = "<%@" ascii nocase
-        $process_start = "Process.Start" ascii nocase
-        $cmd_shell = "cmd.exe" ascii nocase
-        $powershell = "powershell" ascii nocase
-        $response_write = "Response.Write" ascii nocase
-        $request_form = "Request.Form" ascii nocase
-        $compile_assembly = "CompileAssemblyFromSource" ascii nocase
+        $tag = "<%@" ascii nocase
+        $tag_chopper = "<%" ascii
+        $proc = "Process.Start" ascii nocase
+        $psi = "ProcessStartInfo" ascii nocase
+        $cmd = "cmd.exe" ascii nocase
+        $ps = "powershell" ascii nocase
+        $req1 = "Request.Form" ascii nocase
+        $req2 = "Request.QueryString" ascii nocase
+        $req3 = "Request.Item" ascii nocase
+        $compile = "CompileAssemblyFromSource" ascii nocase
+        $chopper = "eval(Request" ascii nocase
 
     condition:
-        $aspx_tag and (
-            ($process_start and ($cmd_shell or $powershell)) or
-            ($response_write and $request_form and ($cmd_shell or $powershell)) or
-            $compile_assembly
+        filesize < 1MB and (
+            ($tag and ($proc or $psi) and ($cmd or $ps) and 1 of ($req*)) or
+            ($tag and $compile) or
+            ($tag_chopper and $chopper)
         )
 }
 
 rule WebShell_JSP_Generic
 {
     meta:
-        description = "Detects common JSP web shell patterns"
+        description = "JSP page that executes an OS command taken from a request parameter"
         author = "Omar Alraas"
+        date = "2025-01-20"
+        modified = "2026-10-25"
         severity = "critical"
         mitre_attack = "T1505.003"
-        date = "2025-01-20"
 
     strings:
-        $jsp_runtime = "Runtime.getRuntime().exec" ascii
-        $jsp_process = "ProcessBuilder" ascii
-        $jsp_request = "request.getParameter" ascii
-        $jsp_cmd = "/bin/sh" ascii
-        $jsp_cmd_win = "cmd.exe" ascii
+        $exec1 = "Runtime.getRuntime().exec" ascii
+        $exec2 = "ProcessBuilder" ascii
+        $param = "request.getParameter" ascii
 
     condition:
-        ($jsp_runtime or $jsp_process) and $jsp_request and ($jsp_cmd or $jsp_cmd_win)
+        filesize < 1MB and 1 of ($exec*) and $param
 }

@@ -1,0 +1,42 @@
+title: Suspicious Process Opened LSASS with Read Access
+id: 4620146c-692b-4f63-9c6e-48d604e878dd
+status: test
+description: |
+  Detects a process opening lsass.exe with the access masks credential
+  dumpers request (PROCESS_VM_READ combinations), using Sysmon event 10.
+  Only specific OS and Defender binaries are excluded: excluding all of
+  System32 would also hide rundll32 running comsvcs.dll MiniDump.
+references:
+  - https://attack.mitre.org/techniques/T1003/001/
+  - https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon#event-id-10-processaccess
+author: Omar Alraas
+date: 2026-10-25
+tags:
+  - attack.credential-access
+  - attack.t1003.001
+logsource:
+  category: process_access
+  product: windows
+detection:
+  selection:
+    TargetImage|endswith: '\lsass.exe'
+    GrantedAccess:
+      - '0x1010'
+      - '0x1410'
+      - '0x1438'
+      - '0x143a'
+      - '0x1fffff'
+  filter_os:
+    SourceImage:
+      - 'C:\Windows\System32\wininit.exe'
+      - 'C:\Windows\System32\csrss.exe'
+      - 'C:\Windows\System32\svchost.exe'
+      - 'C:\Windows\System32\lsm.exe'
+      - 'C:\Windows\System32\wbem\WmiPrvSE.exe'
+  filter_defender:
+    SourceImage|startswith: 'C:\ProgramData\Microsoft\Windows Defender\Platform\'
+    SourceImage|endswith: '\MsMpEng.exe'
+  condition: selection and not 1 of filter_*
+falsepositives:
+  - Third-party EDR / backup agents (add their exact SourceImage to a filter)
+level: high

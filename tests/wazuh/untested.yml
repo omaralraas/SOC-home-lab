@@ -1,0 +1,10 @@
+# Custom rules that cannot be exercised through wazuh-logtest, with the reason.
+# test_every_custom_rule_has_a_positive_case fails for any rule that is neither
+# covered by a positive case nor listed here, so this list is the complete,
+# reviewed set of coverage gaps.
+
+"100158": >-
+  Uses <time>, which analysisd evaluates against the manager's wall clock at
+  processing time. logtest offers no way to pin the clock, so the result would
+  depend on when CI runs. To validate in the lab: RDP into the Windows host
+  between 22:00 and 06:00 (manager time) and confirm 100158 fires.

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Wazuh integratord entry point for the SOAR webhook (see custom-soar.py).
+# Runs the Python half with the interpreter bundled with the manager.
+WAZUH_PATH="${WAZUH_PATH:-$(cd "$(dirname "$0")/.." && pwd -P)}"
+exec "${WAZUH_PATH}/framework/python/bin/python3" "$(dirname "$0")/custom-soar.py" "$@"

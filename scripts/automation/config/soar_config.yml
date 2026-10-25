@@ -1,49 +1,35 @@
-# SOC Home Lab - SOAR Engine Configuration
+# SOC Home Lab - SOAR engine configuration
+# Secrets come from the environment, never from this file:
+#   SOAR_SHARED_SECRET  - must match <api_key> of the custom-soar integration in wazuh/ossec.conf
+#   ABUSEIPDB_API_KEY   - optional, enables reputation scoring
+#   SLACK_WEBHOOK_URL   - optional, enables notifications
 
-# Threat Intelligence Settings
-threat_intel:
-  # AbuseIPDB API key (get free key at https://www.abuseipdb.com/account/api)
-  abuseipdb_api_key: "YOUR_API_KEY_HERE"
-  
-  # Local blocklist file path
-  local_blocklist_path: "config/blocklist.txt"
-  
-  # Cache TTL in hours
-  cache_ttl_hours: 24
-
-# Automated Response Settings
-auto_response:
-  # Minimum Wazuh rule level to auto-block source IP
-  block_ip_min_level: 10
-  
-  # Minimum Wazuh rule level to auto-disable account
-  disable_account_min_level: 12
-
-# Response Engine Settings
 response:
-  # Enable dry run mode (simulates actions without executing)
-  dry_run: true
-  
-  # Path to store blocked IPs
-  blocked_ips_path: "config/blocked_ips.txt"
-  
-  # Slack webhook for notifications
-  slack_webhook_url: "YOUR_WEBHOOK_URL"
+  # Block the source IP when the alert is at least this level AND its
+  # AbuseIPDB score reaches block_min_reputation ...
+  block_ip_min_level: 10
+  block_min_reputation: 50
+  # ... or unconditionally for these high-confidence rules (stock SSH brute
+  # force, password spraying, web login brute force).
+  always_block_rules: [5712, 5763, 100100, 100104]
+  block_ttl_seconds: 3600
 
-# Alert Processing
-alert_processing:
-  # Maximum alerts to process per minute
-  rate_limit: 60
-  
-  # Alert retention (hours)
-  retention_hours: 168
-  
-  # Minimum alert level to process
-  min_level: 3
+  # Never block the lab's own infrastructure, even if an alert names it
+  # (an attacker who can trigger alerts must not be able to cut us off).
+  never_block:
+    - 10.0.0.0/24     # corporate VLAN
+    - 10.0.1.0/24     # SOC management VLAN
+    - 127.0.0.0/8
+    - ::1/128
 
-# Logging
-logging:
-  level: "INFO"
-  file: "soar_engine.log"
-  max_size_mb: 50
-  backup_count: 5
+  notify_min_level: 12
+  # Credential-compromise rules: surfaced to an analyst, never automatic
+  recommend_disable_account_rules: [40112, 100102]
+
+dedup_seconds: 600
+max_clock_skew_seconds: 300
+reputation_cache_seconds: 86400
+
+paths:
+  blocklist: data/blocklist.json
+  audit_log: /var/log/soar/actions.json

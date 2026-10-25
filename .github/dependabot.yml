@@ -1,0 +1,14 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: monthly }
+  - package-ecosystem: pip
+    directories: ["/", "/scripts/automation"]
+    schedule: { interval: monthly }
+    groups:
+      sigma:
+        patterns: ["pysigma*", "sigma-cli"]
+  - package-ecosystem: docker
+    directory: /scripts/automation
+    schedule: { interval: monthly }

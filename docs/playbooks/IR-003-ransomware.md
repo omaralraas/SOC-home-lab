@@ -6,7 +6,7 @@
 | **Title** | Ransomware Incident Response |
 | **Severity** | **CRITICAL** |
 | **Author** | Omar Alraas |
-| **Last Updated** | 2025-02-01 |
+| **Last Updated** | 2026-10-25 |
 | **MITRE ATT&CK** | T1486 (Data Encrypted for Impact), T1490 (Inhibit Recovery) |
 
 ## ⚠️ CRITICAL: Immediate Actions (First 15 Minutes)
@@ -23,7 +23,9 @@
 - [ ] Document the ransom note (screenshot, do not interact)
 
 ## Detection Sources
-- Wazuh rules: 100125-100126 (file encryption, shadow copy deletion)
+- Wazuh custom rules: 100132 (shadow copy / backup destruction), 100133 / 100134 (burst of files
+  written with encrypted extensions by one process), 100126 (Defender disabled)
+- Sigma: `shadow_copy_deletion`, `disable_windows_defender`
 - YARA: ransomware_indicators.yar matches
 - Suricata: C2 beaconing alerts
 - File integrity monitoring (FIM): Rapid file changes

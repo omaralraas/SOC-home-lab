@@ -1,0 +1,4 @@
+# Configs, rules and scripts are mounted into Linux containers: keep LF everywhere.
+* text=auto eol=lf
+*.png binary
+*.pcap binary

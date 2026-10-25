@@ -1,0 +1,45 @@
+title: PowerShell Download Cradle Executed in Memory
+id: 45f28ff8-212e-47ff-beff-ea32de0cfe37
+status: test
+description: |
+  Detects PowerShell downloading content and passing it straight to
+  Invoke-Expression, the classic fileless loader pattern. Downloads that are
+  saved to disk without being executed in memory are not matched.
+references:
+  - https://attack.mitre.org/techniques/T1059/001/
+  - https://attack.mitre.org/techniques/T1105/
+author: Omar Alraas
+date: 2026-10-25
+tags:
+  - attack.execution
+  - attack.t1059.001
+  - attack.command-and-control
+  - attack.t1105
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_image:
+    - Image|endswith:
+        - '\powershell.exe'
+        - '\pwsh.exe'
+    - OriginalFileName:
+        - 'PowerShell.EXE'
+        - 'pwsh.dll'
+  selection_download:
+    CommandLine|contains:
+      - 'DownloadString'
+      - 'DownloadData'
+      - 'Net.WebClient'
+      - 'Invoke-WebRequest'
+      - 'iwr '
+      - 'Invoke-RestMethod'
+      - 'irm '
+  selection_execute:
+    CommandLine|contains:
+      - 'IEX'
+      - 'Invoke-Expression'
+  condition: selection_image and selection_download and selection_execute
+falsepositives:
+  - Software bootstrap one-liners (e.g. Chocolatey install) run by administrators
+level: high

@@ -1,0 +1,133 @@
+# Detection-as-code pipeline: every rule, config and query in this repo is
+# validated and tested against the real engines before it can merge.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+  FORCE_COLOR: "1"
+
+jobs:
+  lint:
+    name: Lint and generated docs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Ruff
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Sigma rule validation
+        run: sigma check --fail-on-issues detection-rules/sigma
+      - name: Shellcheck
+        run: shellcheck elastic/setup/setup.sh wazuh/integrations/custom-soar
+      - name: Generated docs are current
+        run: |
+          python -m tools.convert_sigma --check
+          python -m tools.attack_coverage --check
+      - name: Compose files are valid
+        run: |
+          docker compose -f wazuh/docker-compose.yml --env-file wazuh/.env.example config -q
+          docker compose -f elastic/docker-compose.yml --env-file elastic/.env.example config -q
+          docker compose -f suricata/docker-compose.yml config -q
+
+  unit:
+    name: Sigma, YARA and tool tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -m "not docker" --cov=tools --cov=scripts --cov-report=term-missing
+
+  wazuh:
+    name: Wazuh ruleset on analysisd 4.14
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: docker pull -q wazuh/wazuh-manager:4.14.8
+      - run: pytest tests/wazuh
+
+  suricata:
+    name: Suricata rules on generated PCAPs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: docker pull -q jasonish/suricata:8.0.7
+      - run: pytest tests/suricata
+
+  elastic:
+    name: ES|QL hunts and Logstash pipelines
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Logstash config test
+        run: |
+          version=$(grep STACK_VERSION elastic/.env.example | cut -d= -f2)
+          for pipeline in elastic/logstash/pipeline/*.conf; do
+            docker run --rm -e LOGSTASH_PASSWORD=x -e XPACK_MONITORING_ENABLED=false \
+              -v "$PWD/elastic/logstash/pipeline:/p:ro" "docker.elastic.co/logstash/logstash:$version" \
+              bin/logstash --config.test_and_exit -f "/p/$(basename "$pipeline")"
+          done
+      - run: pytest tests/elastic
+
+  e2e:
+    name: End-to-end Elastic stack
+    needs: [elastic, suricata]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -m e2e tests/elastic
+
+  soar-image:
+    name: SOAR container builds
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker build -t soclab-soar:ci scripts/automation

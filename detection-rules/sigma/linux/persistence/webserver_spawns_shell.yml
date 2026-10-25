@@ -1,0 +1,41 @@
+title: Web Server Process Spawned a Shell or Recon Command
+id: 7081ec7c-3368-4fab-a3d4-5cff951fb266
+status: test
+description: |
+  Detects Apache, nginx or PHP-FPM starting a shell, interpreter or recon
+  command, the behavioural footprint of a web shell being used. Catches web
+  shells that the YARA rules miss because they are obfuscated or packed.
+references:
+  - https://attack.mitre.org/techniques/T1505/003/
+author: Omar Alraas
+date: 2026-10-25
+tags:
+  - attack.persistence
+  - attack.t1505.003
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_parent:
+    - ParentImage|endswith:
+        - '/apache2'
+        - '/httpd'
+        - '/nginx'
+        - '/lighttpd'
+    - ParentImage|contains: '/php-fpm'
+  selection_child:
+    Image|endswith:
+      - '/sh'
+      - '/bash'
+      - '/dash'
+      - '/nc'
+      - '/ncat'
+      - '/python3'
+      - '/perl'
+      - '/whoami'
+      - '/id'
+      - '/uname'
+  condition: selection_parent and selection_child
+falsepositives:
+  - CGI applications that legitimately shell out (document them and filter by CommandLine)
+level: high

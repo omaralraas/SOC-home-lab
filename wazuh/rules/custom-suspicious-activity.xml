@@ -1,89 +1,183 @@
 <!--
-  SOC Home Lab - Suspicious Activity Detection Rules
-  Author: Omar Alraas
+  SOC Home Lab - Endpoint Threat Detection Rules (Sysmon + Security log)
+  Author:   Omar Alraas
   Rule IDs: 100120-100149
-  Focus: PowerShell abuse, LOLBin usage, suspicious file operations
--->
-<group name="custom_suspicious_activity,">
+  Tests:    tests/wazuh/cases/endpoint.yml
 
-  <!-- Suspicious PowerShell: Encoded or obfuscated commands -->
-  <rule id="100120" level="12">
-    <if_sid>61600</if_sid>
-    <field name="win.eventdata.commandLine" type="pcre2">(?i)(encodedcommand|bypass|hidden|noprofile.*downloadstring)</field>
-    <description>Suspicious PowerShell: Encoded or obfuscated command execution</description>
+  Every rule here fills a gap in the stock 4.14 ruleset: without it, the
+  matching test events fall through to level-0 base rules. Behaviour the
+  stock ruleset already alerts on (certutil downloads 92075, LSASS handle
+  access 92900, executables dropped in Temp/Public 92213/92207, log clearing
+  60117, admin group changes 60154) is not duplicated; tests/wazuh keeps
+  regression cases proving those stock rules still fire.
+
+  Rule-tree placement: analysisd tries a parent's children in order and the
+  first match wins, without trying its siblings. Under 61603 (Sysmon process
+  creation) the stock level-0 grouping rules 92025 (reg.exe), 92028
+  (PowerShell running a script file), 92042 (netsh) and 92069 (WmiPrvSE
+  parent) are tried first, so a rule hung only off 61603 never sees those
+  events. Process-creation rules are therefore attached to all five parents.
+  The same applies to 92300 (Run-key writes) under 61615.
+
+  EventChannel field values keep JSON-escaped backslashes (C:\\Windows\\...,
+  as in Wazuh's own ruleset tests), so separators are matched with \\+.
+-->
+<group name="custom_endpoint,">
+
+  <!-- ===================== Execution ===================== -->
+
+  <rule id="100120" level="10">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)\\(powershell|pwsh)\.exe$</field>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)\s[-/]e[a-z]*\s+[a-z0-9+/]{20,}={0,2}(\s|$)</field>
+    <description>PowerShell launched with a Base64-encoded command (parent: $(win.eventdata.parentImage))</description>
     <mitre>
       <id>T1059.001</id>
       <id>T1027</id>
     </mitre>
-    <group>suspicious,powershell,execution,</group>
+    <group>execution,powershell,</group>
   </rule>
 
-  <!-- Known offensive tool command patterns -->
-  <rule id="100121" level="14">
-    <if_sid>61600</if_sid>
-    <field name="win.eventdata.commandLine" type="pcre2">(?i)(invoke-kerberoast|invoke-sharphound|get-gpppassword)</field>
-    <description>CRITICAL: Known offensive tool command-line pattern detected</description>
+  <rule id="100121" level="10">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)\\(powershell|pwsh)\.exe$</field>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(iex|invoke-expression).*(downloadstring|downloaddata|net\.webclient|invoke-webrequest|iwr\s|invoke-restmethod|irm\s)|(downloadstring|downloaddata|net\.webclient).*(iex|invoke-expression)</field>
+    <description>PowerShell download cradle: remote content piped into Invoke-Expression</description>
     <mitre>
       <id>T1059.001</id>
-      <id>T1003</id>
+      <id>T1105</id>
     </mitre>
-    <group>suspicious,powershell,offensive_tool,</group>
+    <group>execution,powershell,</group>
   </rule>
 
-  <!-- Credential dumping tool detection -->
-  <rule id="100122" level="15">
-    <if_sid>61600</if_sid>
-    <field name="win.eventdata.commandLine" type="pcre2">(?i)(sekurlsa|kerberos::list|lsadump|privilege::debug)</field>
-    <description>CRITICAL: Credential dumping tool arguments detected</description>
+  <rule id="100122" level="12">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(invoke-mimikatz|invoke-kerberoast|invoke-bloodhound|sharphound|get-gpppassword|invoke-allchecks|powerup\.ps1|powerview\.ps1|invoke-rubeus|invoke-smbexec|invoke-wmiexec|invoke-thehash|invoke-portscan)</field>
+    <description>Known offensive PowerShell tooling on the command line: $(win.eventdata.commandLine)</description>
+    <mitre>
+      <id>T1059.001</id>
+    </mitre>
+    <group>execution,offensive_tool,</group>
+  </rule>
+
+  <rule id="100123" level="13">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)\\mshta\.exe$</field>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(https?://|javascript:|vbscript:)</field>
+    <description>Mshta executing remote or inline script content</description>
+    <mitre>
+      <id>T1218.005</id>
+    </mitre>
+    <group>defense_evasion,lolbin,</group>
+  </rule>
+
+  <!-- ===================== Credential Access ===================== -->
+
+  <rule id="100124" level="15">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(sekurlsa::|lsadump::|kerberos::(golden|ptt|list)|privilege::debug|token::elevate|crypto::capi|dpapi::|vault::cred)</field>
+    <description>Mimikatz module syntax on the command line of $(win.eventdata.image)</description>
     <mitre>
       <id>T1003.001</id>
     </mitre>
-    <group>suspicious,credential_access,</group>
+    <group>credential_access,mimikatz,</group>
   </rule>
 
-  <!-- Suspicious file in temp directory -->
-  <rule id="100124" level="8">
-    <if_sid>550</if_sid>
-    <field name="file" type="pcre2">(?i)(\\temp\\|\\tmp\\).*\.(exe|dll|ps1|bat|vbs|js|hta)</field>
-    <description>Executable file created in temp directory: $(file)</description>
+  <rule id="100125" level="15">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)comsvcs(\.dll)?[\s,]+(minidump|#\+?24)|procdump(64)?(\.exe)?\s.*lsass|\s[-/]ma\s+lsass</field>
+    <description>LSASS memory dump via $(win.eventdata.image) (comsvcs MiniDump or ProcDump)</description>
     <mitre>
-      <id>T1204.002</id>
+      <id>T1003.001</id>
     </mitre>
-    <group>suspicious,file_creation,</group>
+    <group>credential_access,</group>
   </rule>
 
-  <!-- Mass file encryption indicator -->
-  <rule id="100125" level="14" frequency="8" timeframe="30">
-    <if_sid>550</if_sid>
-    <field name="file" type="pcre2">(?i)\.(encrypted|locked|crypto|crypt|enc)$</field>
-    <description>CRITICAL: Rapid file extension changes - possible encryption activity</description>
+  <!-- ===================== Defense Impairment ===================== -->
+
+  <rule id="100126" level="12">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)set-mppreference\s.*-disable(realtimemonitoring|behaviormonitoring|blockatfirstseen|ioavprotection|scriptscanning|intrusionpreventionsystem)\s+(\$true|1)|add-mppreference\s.*-exclusion(path|process|extension)|\bsc(\.exe)?\s+(stop|config|delete)\s+windefend|disableantispyware</field>
+    <description>Microsoft Defender protection disabled or excluded: $(win.eventdata.commandLine)</description>
     <mitre>
-      <id>T1486</id>
+      <id>T1685</id>
     </mitre>
-    <group>suspicious,encryption_activity,</group>
+    <group>defense_impairment,</group>
   </rule>
 
-  <!-- Shadow copy deletion -->
-  <rule id="100126" level="15">
-    <if_sid>61600</if_sid>
-    <field name="win.eventdata.commandLine" type="pcre2">(?i)(vssadmin.*delete.*shadows|bcdedit.*recoveryenabled.*no)</field>
-    <description>CRITICAL: Volume shadow copy or recovery modification detected</description>
+  <rule id="100127" level="12">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)wevtutil(\.exe)?\s+(cl|clear-log)\s|clear-eventlog\s|remove-eventlog\s|eventlogsession\]::globalsession\.clearlog</field>
+    <description>Windows event log cleared from the command line by $(win.eventdata.user)</description>
+    <mitre>
+      <id>T1685.005</id>
+    </mitre>
+    <group>defense_impairment,</group>
+  </rule>
+
+  <!-- ===================== Command and Control / Ingress ===================== -->
+
+  <rule id="100128" level="10">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)bitsadmin(\.exe)?\s.*/transfer\s.*https?://|start-bitstransfer\s.*https?://</field>
+    <description>BITS used to download a file: $(win.eventdata.commandLine)</description>
+    <mitre>
+      <id>T1105</id>
+      <id>T1197</id>
+    </mitre>
+    <group>command_and_control,lolbin,</group>
+  </rule>
+
+  <!-- ===================== Persistence ===================== -->
+
+  <rule id="100130" level="10">
+    <if_sid>61615, 92300</if_sid>
+    <field name="win.eventdata.targetObject" type="pcre2">(?i)\\+software\\+(wow6432node\\+)?microsoft\\+windows\\+currentversion\\+(run|runonce)\\+</field>
+    <field name="win.eventdata.details" type="pcre2">(?i)\\+(users\\+public|appdata|windows\\+temp|programdata)\\+|powershell|pwsh|mshta|wscript|cscript|rundll32|regsvr32|cmd(\.exe)?\s+/c</field>
+    <description>Run key persistence pointing at a suspicious location: $(win.eventdata.targetObject) = $(win.eventdata.details)</description>
+    <mitre>
+      <id>T1547.001</id>
+    </mitre>
+    <group>persistence,registry,</group>
+  </rule>
+
+  <rule id="100131" level="10">
+    <if_sid>60228</if_sid>
+    <field name="win.eventdata.taskContent" type="pcre2">(?i)(powershell|pwsh|mshta|wscript|cscript|rundll32|regsvr32)(\.exe)?|\\+(users\\+public|appdata|windows\\+temp|programdata)\\+</field>
+    <description>Scheduled task $(win.eventdata.taskName) created with a script host or user-writable path action</description>
+    <mitre>
+      <id>T1053.005</id>
+    </mitre>
+    <group>persistence,scheduled_task,</group>
+  </rule>
+
+  <!-- ===================== Impact ===================== -->
+
+  <rule id="100132" level="15">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)vssadmin(\.exe)?\s.*delete\s+shadows|vssadmin(\.exe)?\s.*resize\s+shadowstorage|wmic(\.exe)?\s.*shadowcopy\s+delete|wbadmin(\.exe)?\s.*delete\s+(catalog|systemstatebackup)|bcdedit(\.exe)?\s.*recoveryenabled\s+no|bcdedit(\.exe)?\s.*bootstatuspolicy\s+ignoreallfailures|win32_shadowcopy.*\.delete\(</field>
+    <description>Backup / shadow copy destruction: $(win.eventdata.commandLine)</description>
     <mitre>
       <id>T1490</id>
     </mitre>
-    <group>suspicious,impact,</group>
+    <group>impact,ransomware,</group>
   </rule>
 
-  <!-- LOLBin abuse for download -->
-  <rule id="100127" level="10">
-    <if_sid>61600</if_sid>
-    <field name="win.eventdata.commandLine" type="pcre2">(?i)(certutil.*-urlcache|bitsadmin.*\/transfer|mshta.*http)</field>
-    <description>LOLBin abuse: System binary used for download or execution</description>
+  <rule id="100133" level="3">
+    <if_group>sysmon_event_11</if_group>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)\.(locked|encrypted|enc|crypt|crypted|crypto|lockbit|akira|ryk)$</field>
+    <description>File written with a ransomware-associated extension: $(win.eventdata.targetFilename)</description>
+    <group>impact,</group>
+  </rule>
+
+  <rule id="100134" level="15" frequency="10" timeframe="60" ignore="300">
+    <if_matched_sid>100133</if_matched_sid>
+    <same_field>win.eventdata.image</same_field>
+    <description>Possible ransomware: $(win.eventdata.image) wrote 10+ files with encrypted extensions within 60 seconds</description>
     <mitre>
-      <id>T1218</id>
-      <id>T1105</id>
+      <id>T1486</id>
     </mitre>
-    <group>suspicious,lolbin,defense_evasion,</group>
+    <group>impact,ransomware,</group>
   </rule>
 
 </group>

@@ -1,35 +1,42 @@
-title: DNS Tunneling Detection
+title: DNS Query with an Oversized Encoded Label
 id: e6f7a8b9-0c1d-2e3f-4a5b-6c7d8e9f0123
-status: experimental
+status: test
 description: |
-  Detects potential DNS tunneling activity through analysis of DNS query
-  characteristics including excessive length subdomains, high query frequency
-  to single domains, and encoded data patterns.
-author: Omar Alraas
-date: 2025/01/25
+  Detects DNS queries whose first label is 45-63 characters of letters and
+  digits, the shape produced when tools such as dnscat2 and iodine encode data
+  into subdomains, plus dnscat2's default domain prefix. Large CDN and
+  platform domains that legitimately use long hashed labels are filtered.
+  Per-query detection only: volume-based tunnelling is covered by Suricata
+  SID 1000003 and the beacon hunter in scripts/threat-hunting.
 references:
   - https://attack.mitre.org/techniques/T1071/004/
   - https://attack.mitre.org/techniques/T1048/003/
+  - https://github.com/iagox86/dnscat2
+author: Omar Alraas
+date: 2025-01-25
+modified: 2026-10-25
 tags:
-  - attack.command_and_control
-  - attack.exfiltration
+  - attack.command-and-control
   - attack.t1071.004
+  - attack.exfiltration
   - attack.t1048.003
 logsource:
   category: dns
 detection:
-  selection_long_query:
-    query|re: '^[a-zA-Z0-9]{30,}\.'
-  selection_encoded_data:
-    query|re: '^[A-Za-z0-9+/=]{20,}\.'
-  selection_high_entropy:
-    query|contains:
-      - '.dnscat.'
-      - '.dns2tcp.'
-      - '.iodine.'
-  condition: selection_long_query or selection_encoded_data or selection_high_entropy
+  selection_long_label:
+    query|re: '^[A-Za-z0-9-]{45,63}\.'
+  selection_dnscat:
+    query|startswith: 'dnscat.'
+  filter_platforms:
+    query|endswith:
+      - '.amazonaws.com'
+      - '.cloudfront.net'
+      - '.akamaiedge.net'
+      - '.windowsupdate.com'
+      - '.microsoft.com'
+      - '.googleusercontent.com'
+  condition: (selection_long_label or selection_dnscat) and not filter_platforms
 falsepositives:
-  - CDN domains with long subdomains
-  - DKIM/SPF DNS records
-  - Legitimate encoded DNS records
+  - Anti-virus and reputation services that look up file hashes over DNS
+  - Other SaaS platforms using long hashed hostnames (extend filter_platforms)
 level: high

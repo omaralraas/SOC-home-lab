@@ -1,0 +1,25 @@
+# SOC Home Lab - Suricata 8 sensor on the SPAN interface
+#
+#   docker compose run --rm suricata suricata-update   # fetch ET Open once
+#   docker compose up -d
+#
+# The stock config is kept and the lab overlay is layered on with --include,
+# exactly as tests/suricata runs it.
+
+services:
+  suricata:
+    image: jasonish/suricata:8.0.7
+    network_mode: host
+    cap_add: [net_admin, net_raw, sys_nice]
+    restart: unless-stopped
+    command: -i ${SPAN_INTERFACE:-eth1} --include /etc/suricata/soc-lab.yaml
+    volumes:
+      - ./soc-lab.yaml:/etc/suricata/soc-lab.yaml:ro
+      - ./threshold.config:/etc/suricata/threshold.config:ro
+      - ./rules:/etc/suricata/rules:ro
+      - suricata-lib:/var/lib/suricata
+      # eve.json is shipped to Wazuh by the local agent (wazuh/shared/agent.conf)
+      - /var/log/suricata:/var/log/suricata
+
+volumes:
+  suricata-lib:
