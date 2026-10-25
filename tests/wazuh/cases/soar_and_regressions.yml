@@ -1,0 +1,48 @@
+# Test cases for wazuh/rules/custom-soar.xml, plus regression tests that the
+# custom ruleset does not break built-in detections.
+defaults:
+  json_location: /var/log/soar/actions.json
+
+cases:
+  - name: SOAR action audit line fires 100190
+    events:
+      - json:
+          soar: {action: notify, target: slack, status: executed, rule_id: "100101", alert_id: 9f2c1a7b30d44e1a}
+    expect: "100190"
+
+  - name: SOAR firewall block fires 100192
+    events:
+      - json:
+          soar: {action: block_ip, target: 203.0.113.50, status: executed, rule_id: "100102", alert_id: 1b2c3d4e5f607182}
+    expect: "100192"
+
+  - name: failed SOAR action raises 100191
+    events:
+      - json:
+          soar: {action: block_ip, target: 203.0.113.50, status: failed, error: "pfSense API timeout", rule_id: "100102", alert_id: 1b2c3d4e5f607182}
+    expect: "100191"
+
+  # Regression: an earlier version of this repo shipped a custom decoder that
+  # claimed every line starting with {"timestamp": and so starved the built-in
+  # Suricata rules (86600-86604) of events.
+  - name: Suricata EVE alerts still reach the built-in Suricata rules
+    events:
+      - json:
+          timestamp: "2026-10-25T10:00:01.123456+0000"
+          flow_id: 1234567890
+          in_iface: eth1
+          event_type: alert
+          src_ip: 10.0.2.100
+          src_port: 51022
+          dest_ip: 10.0.0.51
+          dest_port: 80
+          proto: TCP
+          alert:
+            action: allowed
+            gid: 1
+            signature_id: 1000012
+            rev: 2
+            signature: "SOC-LAB: SQL injection pattern in HTTP URI"
+            category: Web Application Attack
+            severity: 1
+    expect: "86601"

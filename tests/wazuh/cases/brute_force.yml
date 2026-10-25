@@ -1,0 +1,124 @@
+# Test cases for wazuh/rules/custom-brute-force.xml.
+# "[stock]" cases pin the stock correlation rules the custom rules build on
+# and prove the custom rules do not starve them (see the design note in the
+# rule file).
+defaults:
+  log_format: syslog
+  location: /var/log/auth.log
+
+cases:
+  # ---------------------------------------------------------------- SSH
+  - name: "[stock] 8 bad passwords from one source fire 5763"
+    events:
+      - repeat: 8
+        event: "Oct 25 10:00:01 ubuntu-srv sshd[2201]: Failed password for jdoe from 10.0.2.100 port 51022 ssh2"
+    expect: "5763"
+
+  - name: "[stock] 8 invalid-user attempts from one source fire 5712"
+    events:
+      - repeat: 8
+        event: "Oct 25 10:00:01 ubuntu-srv sshd[2201]: Invalid user oracle from 10.0.2.100 port 51022"
+    expect: "5712"
+
+  - name: "[stock] SSH success after brute force fires 40112"
+    events:
+      - repeat: 8
+        event: "Oct 25 10:00:01 ubuntu-srv sshd[2201]: Failed password for jdoe from 10.0.2.100 port 51022 ssh2"
+      - "Oct 25 10:00:09 ubuntu-srv sshd[2210]: Accepted password for jdoe from 10.0.2.100 port 51030 ssh2"
+    expect: "40112"
+
+  - name: direct root SSH login fires policy rule 100103
+    events:
+      - "Oct 25 10:00:09 ubuntu-srv sshd[2210]: Accepted publickey for root from 10.0.1.5 port 51030 ssh2: ED25519 SHA256:3fQ1vVv0kx"
+    expect: "100103"
+
+  - name: ordinary user SSH login is not a policy violation
+    events:
+      - "Oct 25 10:00:09 ubuntu-srv sshd[2210]: Accepted publickey for omar from 10.0.1.5 port 51030 ssh2: ED25519 SHA256:3fQ1vVv0kx"
+    expect: "5715"
+
+  # ---------------------------------------------------------------- Windows
+  - name: "[stock] 8 failures against one account fire 60204, not the spray rule"
+    events:
+      - repeat: 8
+        event: {security: 4625, targetUserName: administrator, ipAddress: 10.0.2.100, logonType: 3}
+    expect: "60204"
+
+  - name: failures against 6 different accounts from one source fire password-spray rule 100100
+    events:
+      - {security: 4625, targetUserName: alice, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4625, targetUserName: bob, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4625, targetUserName: carol, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4625, targetUserName: dave, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4625, targetUserName: erin, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4625, targetUserName: frank, ipAddress: 10.0.2.100, logonType: 3}
+    expect: "100100"
+
+  - name: 5 different accounts stay under the spray threshold
+    events:
+      - {security: 4625, targetUserName: alice, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4625, targetUserName: bob, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4625, targetUserName: carol, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4625, targetUserName: dave, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4625, targetUserName: erin, ipAddress: 10.0.2.100, logonType: 3}
+    expect_not: "100100"
+
+  - name: spraying split across two sources is not correlated together
+    events:
+      - {security: 4625, targetUserName: alice, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4625, targetUserName: bob, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4625, targetUserName: carol, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4625, targetUserName: dave, ipAddress: 10.0.2.101, logonType: 3}
+      - {security: 4625, targetUserName: erin, ipAddress: 10.0.2.101, logonType: 3}
+      - {security: 4625, targetUserName: frank, ipAddress: 10.0.2.101, logonType: 3}
+    expect_not: "100100"
+
+  - name: lockouts of 3 different accounts fire 100101
+    events:
+      - {security: 4740, targetUserName: alice}
+      - {security: 4740, targetUserName: bob}
+      - {security: 4740, targetUserName: carol}
+    expect: "100101"
+
+  - name: the same account locked out repeatedly is not spraying
+    events:
+      - repeat: 3
+        event: {security: 4740, targetUserName: alice}
+    expect_not: "100101"
+
+  - name: remote logon right after a brute-force alert fires 100102
+    events:
+      - repeat: 8
+        event: {security: 4625, targetUserName: administrator, ipAddress: 10.0.2.100, logonType: 3}
+      - {security: 4624, targetUserName: administrator, ipAddress: 10.0.2.100, logonType: 3, logonProcessName: NtLmSsp, authenticationPackageName: NTLM}
+    expect: "100102"
+
+  - name: remote logon with no preceding failures is not flagged as compromise
+    events:
+      - {security: 4624, targetUserName: administrator, ipAddress: 10.0.0.60, logonType: 3, logonProcessName: Kerberos, authenticationPackageName: Kerberos}
+    expect_not: "100102"
+
+  # ---------------------------------------------------------------- Web
+  - name: 10 HTTP 401s from one client fire 100104
+    log_format: apache
+    location: /var/log/apache2/access.log
+    events:
+      - repeat: 10
+        event: '10.0.2.100 - - [25/Oct/2026:10:00:01 +0000] "POST /wp-login.php HTTP/1.1" 401 512 "-" "python-requests/2.31"'
+    expect: "100104"
+
+  - name: 9 HTTP 401s stay under the threshold
+    log_format: apache
+    location: /var/log/apache2/access.log
+    events:
+      - repeat: 9
+        event: '10.0.2.100 - - [25/Oct/2026:10:00:01 +0000] "POST /wp-login.php HTTP/1.1" 401 512 "-" "python-requests/2.31"'
+    expect_not: "100104"
+
+  - name: 10 HTTP 404s (content discovery, not login brute force) do not fire 100104
+    log_format: apache
+    location: /var/log/apache2/access.log
+    events:
+      - repeat: 10
+        event: '10.0.2.100 - - [25/Oct/2026:10:00:01 +0000] "GET /backup.zip HTTP/1.1" 404 512 "-" "gobuster/3.6"'
+    expect_not: "100104"

