@@ -1,0 +1,40 @@
+title: Run Key Persistence Pointing at a Staging Path or Script Host
+id: bd90b513-5706-4897-9dbf-0b852c805fb5
+status: test
+description: |
+  Detects Run / RunOnce values whose data launches a script host or LOLBin,
+  or a binary in a world-writable staging folder. Legitimate per-user apps
+  usually autostart from Program Files or AppData\Roaming / Local\Programs,
+  which are deliberately not matched.
+references:
+  - https://attack.mitre.org/techniques/T1547/001/
+author: Omar Alraas
+date: 2026-10-25
+tags:
+  - attack.persistence
+  - attack.privilege-escalation
+  - attack.t1547.001
+logsource:
+  category: registry_set
+  product: windows
+detection:
+  selection_key:
+    TargetObject|contains:
+      - '\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\'
+      - '\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce\'
+      - '\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run\'
+  selection_value:
+    Details|contains:
+      - '\Users\Public\'
+      - '\AppData\Local\Temp\'
+      - '\Windows\Temp\'
+      - 'powershell'
+      - 'mshta'
+      - 'wscript'
+      - 'cscript'
+      - 'rundll32'
+      - 'regsvr32'
+  condition: selection_key and selection_value
+falsepositives:
+  - Installers that schedule a one-off RunOnce cleanup via rundll32
+level: high

@@ -1,0 +1,33 @@
+title: Windows Event Log Cleared from the Command Line
+id: a1886bc2-b4e0-4edf-935d-95357e3d242e
+status: test
+description: |
+  Detects event logs being wiped with wevtutil, the PowerShell eventlog
+  cmdlets or the .NET EventLogSession API. Complements the Security 1102 /
+  System 104 events, which only fire after the log is already gone and can be
+  missing when the attacker clears logs that are not forwarded.
+references:
+  - https://attack.mitre.org/techniques/T1685/005/
+author: Omar Alraas
+date: 2026-10-25
+tags:
+  - attack.defense-impairment
+  - attack.t1685.005
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_wevtutil:
+    Image|endswith: '\wevtutil.exe'
+    CommandLine|contains:
+      - ' cl '
+      - ' clear-log '
+  selection_powershell:
+    CommandLine|contains:
+      - 'Clear-EventLog'
+      - 'Remove-EventLog'
+      - 'GlobalSession.ClearLog'
+  condition: 1 of selection_*
+falsepositives:
+  - Lab image resets and golden-image preparation scripts
+level: high

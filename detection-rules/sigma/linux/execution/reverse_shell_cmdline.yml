@@ -1,0 +1,41 @@
+title: Linux Reverse Shell One-Liner
+id: 91bff04e-b442-45be-83fc-56b25ef8997d
+status: test
+description: |
+  Detects the common reverse-shell one-liners on Linux: bash /dev/tcp
+  redirection, netcat or ncat with an exec flag, socat exec, and the Python
+  socket + pty pattern. Mirrors the YARA rules in detection-rules/yara, which
+  catch the same payloads at rest.
+references:
+  - https://attack.mitre.org/techniques/T1059/004/
+  - https://gtfobins.github.io/#+reverse%20shell
+author: Omar Alraas
+date: 2026-10-25
+tags:
+  - attack.execution
+  - attack.t1059.004
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_dev_tcp:
+    CommandLine|contains: '/dev/tcp/'
+  selection_netcat:
+    CommandLine|contains:
+      - 'nc -e '
+      - 'nc.traditional -e '
+      - 'ncat -e '
+      - 'ncat --exec '
+  selection_socat:
+    CommandLine|contains|all:
+      - 'socat'
+      - 'exec:'
+  selection_python:
+    CommandLine|contains|all:
+      - 'socket'
+      - 'connect('
+      - 'pty.spawn'
+  condition: 1 of selection_*
+falsepositives:
+  - Penetration testing and CTF practice on lab hosts
+level: high

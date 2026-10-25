@@ -1,40 +1,48 @@
-title: Suspicious Sudo Usage - Privilege Escalation
+title: Sudo Used to Spawn a Root Shell or Tamper with Privileges
 id: d5e6f7a8-9b0c-1d2e-3f4a-5b6c7d8e9f01
-status: experimental
+status: test
 description: |
-  Detects unusual sudo usage patterns that may indicate privilege escalation
-  attempts or abuse of sudo misconfigurations.
-author: Omar Alraas
-date: 2025/01/25
+  Detects sudo being used to start an interactive root shell, set SUID bits,
+  edit sudoers / shadow or grant sudo group membership, plus users who are
+  not in sudoers attempting it. Ordinary sudo use (package updates, service
+  restarts) is not matched.
 references:
   - https://attack.mitre.org/techniques/T1548/003/
+  - https://gtfobins.github.io/#+sudo
+author: Omar Alraas
+date: 2025-01-25
+modified: 2026-10-25
 tags:
-  - attack.privilege_escalation
+  - attack.privilege-escalation
   - attack.t1548.003
 logsource:
   product: linux
   service: auth
 detection:
-  selection_sudo_abuse:
-    - message|contains:
-        - 'sudo:'
-        - 'COMMAND='
-    - message|contains:
-        - '/bin/bash'
-        - '/bin/sh'
-        - 'chmod +s'
-        - 'chown root'
-        - 'passwd'
-        - 'visudo'
-        - '/etc/shadow'
-        - 'NOPASSWD'
-  selection_sudo_failure:
-    message|contains:
-      - 'incorrect password attempt'
-      - 'NOT in sudoers'
-      - 'authentication failure'
-  condition: selection_sudo_abuse or selection_sudo_failure
+  keywords_sudo_command:
+    - 'COMMAND='
+  keywords_risky_command:
+    - 'COMMAND=/bin/bash'
+    - 'COMMAND=/bin/sh'
+    - 'COMMAND=/usr/bin/bash'
+    - 'COMMAND=/usr/bin/sh'
+    - 'COMMAND=/bin/su'
+    - 'COMMAND=/usr/bin/su'
+    - '-exec /bin/sh'
+    - '-exec /bin/bash'
+    - 'chmod +s'
+    - 'chmod u+s'
+    - 'chmod 4755'
+    - '/etc/sudoers'
+    - 'visudo'
+    - '/etc/shadow'
+    - 'usermod -aG sudo'
+    - 'NOPASSWD'
+  keywords_denied:
+    - 'user NOT in sudoers'
+    - 'incorrect password attempts'
+  condition: (keywords_sudo_command and keywords_risky_command) or keywords_denied
 falsepositives:
-  - Legitimate system administration
-  - Automated configuration management tools (Ansible, Puppet)
+  - Administrators who habitually run "sudo bash" instead of "sudo -i"
+  - Configuration management (Ansible, Puppet) editing sudoers
 level: medium

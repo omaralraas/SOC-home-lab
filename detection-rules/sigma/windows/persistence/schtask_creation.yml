@@ -1,49 +1,47 @@
-title: Suspicious Scheduled Task Creation
+title: Scheduled Task Created with a Script Host or User-Writable Action
 id: 3a6b14c7-9f8e-4d2a-b5c1-e7f3a9d80123
-status: stable
+status: test
 description: |
-  Detects creation of scheduled tasks that may indicate persistence mechanisms.
-  Monitors Windows Security Event ID 4698 (scheduled task created) for suspicious
-  task names, executable paths, or encoded commands.
-author: Omar Alraas
-date: 2025/01/15
-modified: 2025/02/01
+  Detects scheduled tasks (Security event 4698) whose action runs a script
+  host or LOLBin, or a binary from a user-writable folder. It keys on what
+  the task executes rather than its name, since attackers name tasks after
+  updaters and every browser ships a real "Update" task.
 references:
   - https://attack.mitre.org/techniques/T1053/005/
-  - https://docs.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4698
+  - https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4698
+author: Omar Alraas
+date: 2025-01-15
+modified: 2026-10-25
 tags:
+  - attack.execution
   - attack.persistence
-  - attack.privilege_escalation
+  - attack.privilege-escalation
   - attack.t1053.005
 logsource:
   product: windows
   service: security
-  definition: Requirements - audit policy for Object Access > Audit Other Object Access Events must be enabled
+  definition: 'Requirements: Audit Other Object Access Events must be enabled'
 detection:
-  selection_event:
+  selection:
     EventID: 4698
-  selection_suspicious_paths:
+  selection_action:
     TaskContent|contains:
-      - '\AppData\Local\Temp\'
+      - '\AppData\'
       - '\Users\Public\'
-      - '\ProgramData\'
       - '\Windows\Temp\'
       - 'powershell'
-      - 'cmd.exe /c'
+      - 'pwsh'
       - 'mshta'
       - 'wscript'
       - 'cscript'
       - 'rundll32'
-  selection_suspicious_names:
-    TaskName|contains:
-      - 'update'
-      - 'sync'
-      - 'helper'
-      - 'service'
-      - 'system'
-  condition: selection_event and (selection_suspicious_paths or selection_suspicious_names)
+      - 'regsvr32'
+      - 'cmd.exe /c'
+      - 'cmd /c'
+  filter_microsoft:
+    TaskName|startswith: '\Microsoft\'
+  condition: selection and selection_action and not filter_microsoft
 falsepositives:
-  - Legitimate software installers creating update tasks
-  - System administration scripts
-  - GPO-deployed scheduled tasks
+  - Administrative scripts scheduled through PowerShell (allow-list by TaskName)
+  - Per-user application updaters installed under AppData (e.g. Teams, Zoom)
 level: medium

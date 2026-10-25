@@ -1,0 +1,51 @@
+title: Shadow Copy or Backup Catalog Destroyed
+id: cb210658-f569-4c76-8446-d90f9c01595f
+status: test
+description: |
+  Detects the recovery-inhibition step most ransomware runs before
+  encrypting: deleting or shrinking Volume Shadow Copies, deleting the backup
+  catalog, or disabling Windows Recovery. Any one of the variants matches.
+references:
+  - https://attack.mitre.org/techniques/T1490/
+author: Omar Alraas
+date: 2026-10-25
+tags:
+  - attack.impact
+  - attack.t1490
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_vssadmin_delete:
+    Image|endswith: '\vssadmin.exe'
+    CommandLine|contains|all:
+      - 'delete'
+      - 'shadows'
+  selection_vssadmin_resize:
+    Image|endswith: '\vssadmin.exe'
+    CommandLine|contains|all:
+      - 'resize'
+      - 'shadowstorage'
+  selection_wmic:
+    Image|endswith: '\wmic.exe'
+    CommandLine|contains|all:
+      - 'shadowcopy'
+      - 'delete'
+  selection_wbadmin:
+    Image|endswith: '\wbadmin.exe'
+    CommandLine|contains|all:
+      - 'delete'
+      - 'catalog'
+  selection_bcdedit:
+    Image|endswith: '\bcdedit.exe'
+    CommandLine|contains:
+      - 'recoveryenabled no'
+      - 'bootstatuspolicy ignoreallfailures'
+  selection_powershell:
+    CommandLine|contains|all:
+      - 'Win32_ShadowCopy'
+      - 'Delete'
+  condition: 1 of selection_*
+falsepositives:
+  - Backup software rotating its own shadow copies (verify the parent process)
+level: high
