@@ -1,99 +1,146 @@
 <!--
   SOC Home Lab - Lateral Movement Detection Rules
-  Author: Omar Alraas
+  Author:   Omar Alraas
   Rule IDs: 100150-100179
+  Tests:    tests/wazuh/cases/lateral_movement.yml
+
+  Where possible each technique is covered from both ends: the source host
+  (operator command line) and the target host (the service / provider process
+  that executes the payload), because in an incident you often only have
+  telemetry from one of them.
 -->
 <group name="custom_lateral_movement,">
 
-  <!-- PsExec execution -->
+  <!-- ===================== PsExec / service execution ===================== -->
+
   <rule id="100150" level="10">
-    <if_sid>61600</if_sid>
-    <field name="win.eventdata.originalFileName" type="pcre2">(?i)psexe(c|svc)</field>
-    <description>PsExec execution detected - potential lateral movement</description>
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.originalFileName" type="pcre2">(?i)^psexec\.c$</field>
+    <!-- a UNC target (\\host) as an argument; drive paths (C:\...) never follow whitespace -->
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(^|[\s"'])\\{2,}[a-z0-9._-]+(\s|$|\\)</field>
+    <description>PsExec run against a remote host (source side): $(win.eventdata.commandLine)</description>
     <mitre>
-      <id>T1570</id>
       <id>T1021.002</id>
+      <id>T1569.002</id>
     </mitre>
     <group>lateral_movement,psexec,</group>
   </rule>
 
-  <!-- Suspicious service installation -->
-  <rule id="100151" level="10">
-    <if_sid>60009</if_sid>
-    <field name="win.system.eventID">^7045$</field>
-    <field name="win.eventdata.serviceName" type="pcre2">(?i)(psexe|cobalt|beacon|empire)</field>
-    <description>Suspicious service installed: $(win.eventdata.serviceName)</description>
+  <rule id="100151" level="12">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.parentImage" type="pcre2">(?i)\\psexesvc\.exe$</field>
+    <description>Process started by the PsExec service (target side): $(win.eventdata.image)</description>
     <mitre>
-      <id>T1543.003</id>
+      <id>T1021.002</id>
+      <id>T1569.002</id>
     </mitre>
-    <group>lateral_movement,service_installation,</group>
+    <group>lateral_movement,psexec,</group>
   </rule>
 
-  <!-- WMI remote execution -->
-  <rule id="100152" level="8">
-    <if_sid>61600</if_sid>
-    <field name="win.eventdata.commandLine" type="pcre2">(?i)(wmic.*\/node:.*process\s+call\s+create)</field>
-    <description>WMI remote process execution detected</description>
+  <rule id="100152" level="12">
+    <if_sid>61138</if_sid>
+    <field name="win.eventdata.imagePath" type="pcre2">(?i)%comspec%|cmd(\.exe)?\s+/[cqr]\s|powershell|pwsh|mshta|rundll32|\\+127\.0\.0\.1\\+|\\+(admin\$|users\\+public|appdata|windows\\+temp|programdata)\\+</field>
+    <description>Service $(win.eventdata.serviceName) installed with a suspicious binary path: $(win.eventdata.imagePath)</description>
+    <mitre>
+      <id>T1543.003</id>
+      <id>T1569.002</id>
+    </mitre>
+    <group>lateral_movement,persistence,service_installation,</group>
+  </rule>
+
+  <!-- ===================== WMI ===================== -->
+
+  <rule id="100153" level="10">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)wmic(\.exe)?\s.*/node:\s*\S+.*process\s+call\s+create|invoke-wmimethod\s.*-computername\s.*win32_process|invoke-cimmethod\s.*-computername\s.*win32_process</field>
+    <description>Remote process creation over WMI (source side): $(win.eventdata.commandLine)</description>
     <mitre>
       <id>T1047</id>
     </mitre>
     <group>lateral_movement,wmi,</group>
   </rule>
 
-  <!-- Off-hours RDP logon -->
-  <rule id="100153" level="8">
-    <if_sid>60106</if_sid>
-    <field name="win.system.eventID">^4624$</field>
-    <field name="win.eventdata.logonType">^10$</field>
-    <time>10:00pm - 6:00am</time>
-    <description>Off-hours RDP logon from $(win.eventdata.ipAddress)</description>
+  <rule id="100154" level="12">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.parentImage" type="pcre2">(?i)\\wmiprvse\.exe$</field>
+    <field name="win.eventdata.image" type="pcre2">(?i)\\(cmd|powershell|pwsh|mshta|rundll32|regsvr32|wscript|cscript)\.exe$</field>
+    <description>WMI provider host spawned $(win.eventdata.image) (target side of wmiexec / remote WMI)</description>
     <mitre>
-      <id>T1021.001</id>
+      <id>T1047</id>
     </mitre>
-    <group>lateral_movement,rdp,off_hours,</group>
+    <group>lateral_movement,wmi,</group>
   </rule>
 
-  <!-- Pass-the-Hash indicator -->
-  <rule id="100154" level="12">
-    <if_sid>60106</if_sid>
-    <field name="win.system.eventID">^4624$</field>
+  <!-- ===================== WinRM / PowerShell Remoting ===================== -->
+
+  <rule id="100155" level="6">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)enter-pssession\s|new-pssession\s|invoke-command\s.*-computername\s</field>
+    <description>PowerShell Remoting session opened to a remote host (source side)</description>
+    <mitre>
+      <id>T1021.006</id>
+    </mitre>
+    <group>lateral_movement,winrm,</group>
+  </rule>
+
+  <rule id="100156" level="10">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.parentImage" type="pcre2">(?i)\\wsmprovhost\.exe$</field>
+    <field name="win.eventdata.image" type="pcre2">(?i)\\(cmd|powershell|pwsh|whoami|net1?|ipconfig|systeminfo|nltest)\.exe$</field>
+    <description>Process spawned inside a WinRM session (target side): $(win.eventdata.image)</description>
+    <mitre>
+      <id>T1021.006</id>
+    </mitre>
+    <group>lateral_movement,winrm,</group>
+  </rule>
+
+  <!-- ===================== Logon-based ===================== -->
+
+  <rule id="100157" level="12">
+    <if_sid>60106, 92651</if_sid>
     <field name="win.eventdata.logonType">^9$</field>
-    <field name="win.eventdata.logonProcessName" type="pcre2">seclogo</field>
-    <description>Potential Pass-the-Hash: Type 9 logon with seclogo process</description>
+    <field name="win.eventdata.logonProcessName" type="pcre2">(?i)^seclogo</field>
+    <field name="win.eventdata.authenticationPackageName" type="pcre2">(?i)^negotiate$</field>
+    <description>NewCredentials (type 9) logon via seclogo for $(win.eventdata.targetUserName): pass-the-hash pattern</description>
     <mitre>
       <id>T1550.002</id>
     </mitre>
     <group>lateral_movement,credential_access,</group>
   </rule>
 
-  <!-- PowerShell remoting -->
-  <rule id="100155" level="8">
-    <if_sid>61600</if_sid>
-    <field name="win.eventdata.commandLine" type="pcre2">(?i)(enter-pssession|invoke-command.*-computername|new-pssession)</field>
-    <description>PowerShell remoting to remote host detected</description>
+  <!--
+    Not covered by tests: <time> is evaluated against the manager's wall clock
+    when the event is processed, which logtest cannot pin. See
+    tests/wazuh/untested.yml.
+  -->
+  <rule id="100158" level="8">
+    <if_sid>60106, 92651</if_sid>
+    <field name="win.eventdata.logonType">^10$</field>
+    <time>10 pm - 6 am</time>
+    <description>Off-hours RDP logon for $(win.eventdata.targetUserName) from $(win.eventdata.ipAddress)</description>
     <mitre>
-      <id>T1021.006</id>
+      <id>T1021.001</id>
     </mitre>
-    <group>lateral_movement,powershell_remoting,</group>
+    <group>lateral_movement,rdp,off_hours,</group>
   </rule>
 
-  <!-- Administrative share access -->
-  <rule id="100156" level="8">
-    <if_sid>60106</if_sid>
-    <field name="win.system.eventID">^5140$</field>
-    <field name="win.eventdata.shareName" type="pcre2">(?i)(ADMIN\$|C\$|IPC\$)</field>
-    <description>Admin share access: $(win.eventdata.shareName) from $(win.eventdata.ipAddress)</description>
+  <rule id="100159" level="8">
+    <if_sid>67017</if_sid>
+    <field name="win.eventdata.shareName" type="pcre2">(?i)\\+(admin|c)\$$</field>
+    <field name="win.eventdata.ipAddress" type="pcre2" negate="yes">^(::1|127\.0\.0\.1|-)$</field>
+    <description>Administrative share $(win.eventdata.shareName) accessed from $(win.eventdata.ipAddress)</description>
     <mitre>
       <id>T1021.002</id>
     </mitre>
     <group>lateral_movement,smb,admin_share,</group>
   </rule>
 
-  <!-- Remote scheduled task -->
-  <rule id="100157" level="10">
-    <if_sid>61600</if_sid>
-    <field name="win.eventdata.commandLine" type="pcre2">(?i)(schtasks.*\/create.*\/s\s)</field>
-    <description>Remote scheduled task creation - lateral movement via task scheduler</description>
+  <!-- ===================== Remote task scheduling ===================== -->
+
+  <rule id="100160" level="10">
+    <if_sid>61603, 92025, 92028, 92042, 92069</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)schtasks(\.exe)?\s.*/create\s.*/s\s+\S+</field>
+    <description>Scheduled task created on a remote host: $(win.eventdata.commandLine)</description>
     <mitre>
       <id>T1053.005</id>
     </mitre>

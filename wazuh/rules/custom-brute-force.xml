@@ -1,103 +1,98 @@
 <!--
-  SOC Home Lab - Custom Brute Force Detection Rules
-  Author: Omar Alraas
+  SOC Home Lab - Authentication Attack Correlation Rules
+  Author:   Omar Alraas
   Rule IDs: 100100-100119
+  Tests:    tests/wazuh/cases/brute_force.yml
+
+  Baseline brute-force detection is left to the stock ruleset, which the
+  tests prove still fires with these rules loaded:
+    5712 / 5763  SSH brute force (invalid users / bad passwords, 8 in 2 min)
+    40112        SSH success after brute force
+    60204        Windows: 8 failed logons from one source in 4 min
+  These rules only add what the stock ruleset misses.
+
+  Correlation design note: analysisd stores an event in EITHER the sid list of
+  its final rule (if any rule uses if_matched_sid on it) OR the group lists,
+  never both. Putting if_matched_sid on a stock rule such as 60122 would
+  therefore silently disable stock group-based correlation (60204, 40111).
+  Rules here correlate through groups, or through rules that are already
+  sid-correlated. tests/wazuh/test_ruleset_lint.py enforces this.
 -->
-<group name="custom_brute_force,authentication_failures,">
+<group name="custom_brute_force,">
 
-  <!-- SSH Brute Force: 5+ failed auth in 2 minutes -->
-  <rule id="100100" level="6" frequency="5" timeframe="120">
-    <if_matched_sid>5710</if_matched_sid>
-    <description>SSH: Multiple failed authentication attempts detected (5+/2min)</description>
-    <mitre>
-      <id>T1110.001</id>
-    </mitre>
-    <group>authentication_failures,ssh,pci_dss_11.4,gdpr_IV_35.7.d,</group>
-  </rule>
-
-  <!-- SSH Brute Force: 15+ failed auth - automated attack -->
-  <rule id="100101" level="10" frequency="15" timeframe="120">
-    <if_matched_sid>5710</if_matched_sid>
-    <description>SSH CRITICAL: Automated attack detected (15+/2min)</description>
-    <mitre>
-      <id>T1110.001</id>
-    </mitre>
-    <group>authentication_failures,ssh,pci_dss_11.4,</group>
-  </rule>
-
-  <!-- SSH Brute Force: 30+ sustained attack -->
-  <rule id="100102" level="12" frequency="30" timeframe="300">
-    <if_matched_sid>5710</if_matched_sid>
-    <description>SSH SEVERE: Sustained attack (30+ attempts in 5min)</description>
-    <mitre>
-      <id>T1110.001</id>
-    </mitre>
-    <group>authentication_failures,ssh,</group>
-  </rule>
-
-  <!-- RDP Brute Force: 5+ failed logons -->
-  <rule id="100103" level="6" frequency="5" timeframe="120">
-    <if_matched_sid>60122</if_matched_sid>
-    <description>RDP: Multiple failed logon attempts (Event 4625, 5+/2min)</description>
-    <mitre>
-      <id>T1110.001</id>
-    </mitre>
-    <group>authentication_failures,rdp,windows,</group>
-  </rule>
-
-  <!-- RDP Brute Force: 15+ critical -->
-  <rule id="100104" level="10" frequency="15" timeframe="180">
-    <if_matched_sid>60122</if_matched_sid>
-    <description>RDP CRITICAL: High-volume failed logons (15+/3min)</description>
-    <mitre>
-      <id>T1110.001</id>
-    </mitre>
-    <group>authentication_failures,rdp,windows,</group>
-  </rule>
-
-  <!-- Web Login Brute Force -->
-  <rule id="100105" level="6" frequency="10" timeframe="60">
-    <if_matched_sid>31104</if_matched_sid>
-    <description>Web login: Multiple HTTP 401 responses (10+/1min)</description>
-    <mitre>
-      <id>T1110.001</id>
-    </mitre>
-    <group>authentication_failures,web,</group>
-  </rule>
-
-  <!-- Account Lockout -->
-  <rule id="100106" level="8">
-    <if_sid>60137</if_sid>
-    <field name="win.system.eventID">^4740$</field>
-    <description>Windows account lockout: $(win.eventdata.targetUserName)</description>
-    <mitre>
-      <id>T1110</id>
-    </mitre>
-    <group>authentication_failures,account_lockout,windows,</group>
-  </rule>
-
-  <!-- Distributed Brute Force -->
-  <rule id="100107" level="10" frequency="5" timeframe="300">
-    <if_matched_sid>100106</if_matched_sid>
-    <same_field>win.eventdata.targetUserName</same_field>
-    <description>Distributed attack: Multiple lockouts for same account</description>
+  <!--
+    Password spraying. 60204 fires on 8 failures from a source but cannot
+    tell guessing one account apart from trying one password on many.
+  -->
+  <rule id="100100" level="12" frequency="6" timeframe="300" ignore="120">
+    <if_sid>60122</if_sid>
+    <if_matched_group>authentication_failed</if_matched_group>
+    <same_field>win.eventdata.ipAddress</same_field>
+    <different_field>win.eventdata.targetUserName</different_field>
+    <description>Password spraying: failed logons for 6+ different accounts from $(win.eventdata.ipAddress) within 5 minutes</description>
     <mitre>
       <id>T1110.003</id>
     </mitre>
-    <group>authentication_failures,distributed,</group>
+    <group>authentication_failures,windows,password_spray,</group>
   </rule>
 
-  <!-- Successful Login After Failed Attempts -->
-  <rule id="100108" level="10" timeframe="600">
-    <if_matched_sid>100100</if_matched_sid>
-    <if_sid>5715</if_sid>
-    <same_source_ip />
-    <description>ALERT: Successful SSH login after failed attempts from same IP</description>
+  <!-- Lockout storm: several *different* accounts locked out in a short window -->
+  <rule id="100101" level="12" frequency="3" timeframe="600" ignore="300">
+    <if_sid>60115</if_sid>
+    <if_matched_group>authentication_failures</if_matched_group>
+    <same_field>win.system.eventID</same_field>
+    <different_field>win.eventdata.targetUserName</different_field>
+    <description>3+ different accounts locked out within 10 minutes: likely password spraying</description>
+    <mitre>
+      <id>T1110.003</id>
+    </mitre>
+    <group>authentication_failures,windows,password_spray,</group>
+  </rule>
+
+  <!--
+    Remote Windows logon from a source that just triggered 60204. The stock
+    equivalent (40112) never sees these events: it attaches via if_group only
+    to rules loaded before it, and the remote-logon rules 92651/92652 live in a
+    later file (0840-win_event_channel.xml).
+  -->
+  <rule id="100102" level="13" timeframe="600">
+    <if_sid>92651</if_sid>
+    <if_matched_group>authentication_failures</if_matched_group>
+    <same_field>win.eventdata.ipAddress</same_field>
+    <description>Remote logon for $(win.eventdata.targetUserName) from $(win.eventdata.ipAddress) succeeded right after a brute-force alert: likely compromised credentials</description>
     <mitre>
       <id>T1110.001</id>
       <id>T1078</id>
     </mitre>
-    <group>authentication_failures,ssh,compromised,</group>
+    <group>authentication_success,windows,compromised_account,</group>
+  </rule>
+
+  <!-- Policy: lab servers set PermitRootLogin no; a root SSH session means drift or abuse -->
+  <rule id="100103" level="10">
+    <if_sid>5715</if_sid>
+    <user>^root$</user>
+    <description>Direct SSH login as root from $(srcip): violates PermitRootLogin policy</description>
+    <mitre>
+      <id>T1078.003</id>
+    </mitre>
+    <group>authentication_success,ssh,policy_violation,</group>
+  </rule>
+
+  <!--
+    Web login brute force: 10 HTTP 401s to one client in a minute. Counts on
+    31101 (stock 4xx rule), which is already sid-correlated by the stock web
+    rules, so this adds no routing change. same_id keeps the count to 401s.
+  -->
+  <rule id="100104" level="10" frequency="10" timeframe="60" ignore="60">
+    <if_matched_sid>31101</if_matched_sid>
+    <id>^401$</id>
+    <same_srcip />
+    <same_id />
+    <description>Web login brute force: 10+ HTTP 401 responses to $(srcip) within 1 minute ($(url))</description>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+    <group>authentication_failures,web,</group>
   </rule>
 
 </group>
