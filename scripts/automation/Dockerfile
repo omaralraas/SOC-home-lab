@@ -1,4 +1,4 @@
-FROM python:3.13.15-slim-bookworm
+FROM python:3.15.0-slim-bookworm
 
 WORKDIR /app
 COPY requirements.txt .
