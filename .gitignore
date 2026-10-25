@@ -17,6 +17,12 @@ __pycache__/
 venv/
 ENV/
 env/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
 
 # Node
 node_modules/
@@ -29,9 +35,10 @@ node_modules/
 elastic/data/
 elastic/logs/
 
-# Wazuh data
+# Wazuh data and generated TLS material
 wazuh/data/
 wazuh/logs/
+wazuh/config/wazuh_indexer_ssl_certs/
 
 # OS generated files
 .DS_Store
