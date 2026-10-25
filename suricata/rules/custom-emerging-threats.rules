@@ -1,46 +1,47 @@
 # =============================================================================
-# SOC Home Lab - Custom Emerging Threat Detection Rules
+# SOC Home Lab - Custom Threat Detection Rules (Suricata 8)
 # Author: Omar Alraas
-# SID Range: 1000001-1000050
+# SID range: 1000001-1000019
+# Tests: tests/suricata (each SID is replayed against generated PCAPs)
+#
+# Real beacon detection (regular intervals + low jitter) needs statistics
+# across many flows; that lives in scripts/threat-hunting/beacon_hunter.py.
 # =============================================================================
 
-# --- C2 Beaconing Detection ---
-# Detect regular interval HTTP connections (potential beaconing)
-alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB: Potential C2 beaconing - regular HTTP POST intervals"; flow:established,to_server; http.method; content:"POST"; threshold:type both,track by_src,count 10,seconds 600; classtype:trojan-activity; sid:1000001; rev:1; metadata:mitre_technique_id T1071.001;)
+# --- Command and control -----------------------------------------------------
 
-# --- DNS Tunneling Detection ---
-# Long subdomain queries (potential DNS tunneling)
-alert dns $HOME_NET any -> any 53 (msg:"SOC-LAB: Possible DNS tunneling - long subdomain query"; dns.query; content:"."; pcre:"/^[a-zA-Z0-9]{30,}\./"; classtype:policy-violation; sid:1000002; rev:1; metadata:mitre_technique_id T1071.004;)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB High-frequency HTTP POSTs to one external host"; flow:established,to_server; http.method; content:"POST"; threshold:type both,track by_src,count 10,seconds 600; classtype:trojan-activity; sid:1000001; rev:2; metadata:mitre_technique_id T1071.001;)
 
-# High volume DNS queries to single domain
-alert dns $HOME_NET any -> any 53 (msg:"SOC-LAB: High volume DNS queries to single domain"; flow:to_server; threshold:type both,track by_src,count 100,seconds 60; classtype:policy-violation; sid:1000003; rev:1; metadata:mitre_technique_id T1071.004;)
+alert tls $EXTERNAL_NET any -> $HOME_NET any (msg:"SOC-LAB TLS certificate with OpenSSL default subject (self-signed tooling)"; flow:established,to_client; tls.cert_subject; content:"O=Internet Widgits Pty Ltd"; classtype:policy-violation; sid:1000004; rev:2; metadata:mitre_technique_id T1573.002;)
 
-# --- Suspicious TLS Certificates ---
-# Self-signed certificate detection
-alert tls $EXTERNAL_NET any -> $HOME_NET any (msg:"SOC-LAB: Self-signed TLS certificate detected"; tls.cert_subject; content:"CN="; tls.cert_issuer; content:"CN="; flow:established,to_client; classtype:policy-violation; sid:1000004; rev:1;)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB curl or wget User-Agent from an internal host"; flow:established,to_server; http.user_agent; pcre:"/^(curl|wget)\//i"; classtype:policy-violation; sid:1000005; rev:2; metadata:mitre_technique_id T1105;)
 
-# --- Suspicious User Agents ---
-alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB: Suspicious User-Agent - curl/wget from workstation"; flow:established,to_server; http.user_agent; content:"curl"; nocase; classtype:policy-violation; sid:1000005; rev:1;)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB Python HTTP library User-Agent from an internal host"; flow:established,to_server; http.user_agent; content:"python-"; startswith; classtype:policy-violation; sid:1000006; rev:2; metadata:mitre_technique_id T1071.001;)
 
-alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB: Suspicious User-Agent - Python requests library"; flow:established,to_server; http.user_agent; content:"python-requests"; nocase; classtype:policy-violation; sid:1000006; rev:1;)
+# --- DNS tunnelling / exfiltration --------------------------------------------
 
-# --- Cryptocurrency Mining ---
-alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB: Potential cryptomining - Stratum protocol"; flow:established,to_server; content:"stratum+tcp://"; nocase; classtype:policy-violation; sid:1000007; rev:1; metadata:mitre_technique_id T1496;)
+alert dns $HOME_NET any -> any any (msg:"SOC-LAB DNS query with an oversized encoded label"; dns.query; bsize:>50; pcre:"/^[A-Za-z0-9-]{45,63}\./"; classtype:bad-unknown; sid:1000002; rev:2; metadata:mitre_technique_id T1071.004;)
 
-alert dns $HOME_NET any -> any 53 (msg:"SOC-LAB: DNS query for known mining pool domain"; dns.query; content:"pool"; nocase; content:"mine"; nocase; distance:0; classtype:policy-violation; sid:1000008; rev:1; metadata:mitre_technique_id T1496;)
+alert dns $HOME_NET any -> any any (msg:"SOC-LAB High rate of DNS queries from one host"; dns.opcode:0; threshold:type both,track by_src,count 100,seconds 60; classtype:bad-unknown; sid:1000003; rev:2; metadata:mitre_technique_id T1071.004;)
 
-# --- Data Exfiltration over DNS ---
-alert dns $HOME_NET any -> any 53 (msg:"SOC-LAB: Potential data exfiltration via DNS TXT query"; dns.query; content:"."; pcre:"/^[a-zA-Z0-9+\/=]{20,}\./"; classtype:bad-unknown; sid:1000009; rev:1; metadata:mitre_technique_id T1048.003;)
+alert dns $HOME_NET any -> any any (msg:"SOC-LAB DNS TXT query with a long encoded label (C2 / exfil channel)"; dns.rrtype:16; dns.query; bsize:>40; pcre:"/^[A-Za-z0-9-]{30,63}\./"; classtype:bad-unknown; sid:1000009; rev:2; metadata:mitre_technique_id T1048.003;)
 
-# --- Port Scanning Detection ---
-alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"SOC-LAB: Potential TCP port scan detected"; flags:S; threshold:type both,track by_src,count 25,seconds 10; classtype:attempted-recon; sid:1000010; rev:1; metadata:mitre_technique_id T1046;)
+# --- Resource hijacking -------------------------------------------------------
 
-# SYN-FIN scan (invalid flag combination)
-alert tcp any any -> $HOME_NET any (msg:"SOC-LAB: TCP SYN+FIN scan detected"; flags:SF; classtype:attempted-recon; sid:1000011; rev:1; metadata:mitre_technique_id T1046;)
+alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB Stratum mining protocol (mining.subscribe)"; flow:established,to_server; content:"\"method\""; content:"mining.subscribe"; distance:0; classtype:policy-violation; sid:1000007; rev:2; metadata:mitre_technique_id T1496.001;)
 
-# --- SQL Injection in HTTP ---
-alert http $EXTERNAL_NET any -> $HTTP_SERVERS $HTTP_PORTS (msg:"SOC-LAB: Potential SQL injection attempt in HTTP request"; flow:established,to_server; http.uri; pcre:"/(\bunion\b.*\bselect\b|\bor\b\s+\b1\s*=\s*1|drop\s+table|insert\s+into)/i"; classtype:web-application-attack; sid:1000012; rev:1; metadata:mitre_technique_id T1190;)
+alert dns $HOME_NET any -> any any (msg:"SOC-LAB DNS lookup for a cryptocurrency mining pool"; dns.query; pcre:"/(^|\.)(supportxmr|nanopool|minexmr|2miners|f2pool|nicehash|moneroocean|hashvault)\./i"; classtype:policy-violation; sid:1000008; rev:2; metadata:mitre_technique_id T1496.001;)
 
-# --- Suspicious Outbound Connections ---
-# Outbound connections on non-standard ports
-alert tcp $HOME_NET any -> $EXTERNAL_NET [!80,!443,!53,!22,!25,!587,!993,!995] (msg:"SOC-LAB: Outbound connection on non-standard port"; flow:established,to_server; threshold:type both,track by_src,count 5,seconds 300; classtype:policy-violation; sid:1000013; rev:1;)
+# --- Reconnaissance / initial access -----------------------------------------
+
+alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"SOC-LAB Possible TCP port scan (SYN burst)"; flow:stateless; flags:S,12; threshold:type both,track by_src,count 25,seconds 10; classtype:attempted-recon; sid:1000010; rev:2; metadata:mitre_technique_id T1046;)
+
+alert tcp any any -> $HOME_NET any (msg:"SOC-LAB TCP SYN+FIN scan"; flow:stateless; flags:SF,12; classtype:attempted-recon; sid:1000011; rev:2; metadata:mitre_technique_id T1046;)
+
+alert http $EXTERNAL_NET any -> $HTTP_SERVERS $HTTP_PORTS (msg:"SOC-LAB SQL injection pattern in HTTP URI"; flow:established,to_server; http.uri; pcre:"/(union(\s|\+|\/\*.*?\*\/)+(all(\s|\+)+)?select|['\x22]\s*or\s+['\x22]?\d+['\x22]?\s*=\s*['\x22]?\d+|\x3b\s*drop\s+table|sleep\(\d+\)|benchmark\()/i"; classtype:web-application-attack; sid:1000012; rev:2; metadata:mitre_technique_id T1190;)
+
+# --- Policy -------------------------------------------------------------------
+# Connection-count rules match the SYN: thresholds count matching *packets*,
+# so matching established traffic would count one chatty session as many.
+
+alert tcp $HOME_NET any -> $EXTERNAL_NET ![21,22,23,25,53,80,123,443,587,993,995] (msg:"SOC-LAB Repeated outbound connections on a non-standard port"; flags:S,12; threshold:type both,track by_src,count 5,seconds 300; classtype:policy-violation; sid:1000013; rev:3; metadata:mitre_technique_id T1571;)

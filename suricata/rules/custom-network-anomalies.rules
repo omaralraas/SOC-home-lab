@@ -1,39 +1,42 @@
 # =============================================================================
-# SOC Home Lab - Network Anomaly Detection Rules
+# SOC Home Lab - Network Anomaly Rules (Suricata 8)
 # Author: Omar Alraas
-# SID Range: 1000020-1000040
+# SID range: 1000020-1000039
+# Tests: tests/suricata
+#
+# ARP spoofing is deliberately absent: Suricata has no ARP rule protocol
+# (the previous "alert arp" rule made the whole file fail to load). Use
+# arpwatch or Zeek for layer-2 monitoring.
 # =============================================================================
 
-# --- ICMP Tunneling ---
-# Unusually large ICMP packets (potential tunneling)
-alert icmp $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB: Large ICMP packet - potential ICMP tunneling"; dsize:>800; classtype:policy-violation; sid:1000020; rev:1; metadata:mitre_technique_id T1095;)
+# --- Tunnelling over ICMP -------------------------------------------------------
 
-# High rate ICMP traffic
-alert icmp $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB: High rate ICMP traffic - potential tunneling"; threshold:type both,track by_src,count 50,seconds 60; classtype:policy-violation; sid:1000021; rev:1; metadata:mitre_technique_id T1095;)
+alert icmp $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB Oversized ICMP echo payload (possible ICMP tunnel)"; itype:8; dsize:>800; classtype:policy-violation; sid:1000020; rev:2; metadata:mitre_technique_id T1095;)
 
-# --- HTTP on Non-Standard Ports ---
-alert http $HOME_NET any -> $EXTERNAL_NET !$HTTP_PORTS (msg:"SOC-LAB: HTTP traffic on non-standard port"; flow:established,to_server; classtype:policy-violation; sid:1000022; rev:1;)
+alert icmp $HOME_NET any -> $EXTERNAL_NET any (msg:"SOC-LAB High rate of outbound ICMP echo (possible ICMP tunnel)"; itype:8; threshold:type both,track by_src,count 50,seconds 60; classtype:policy-violation; sid:1000021; rev:2; metadata:mitre_technique_id T1095;)
 
-# --- Large DNS Responses (possible zone transfer) ---
-alert dns any 53 -> $HOME_NET any (msg:"SOC-LAB: Unusually large DNS response - possible zone transfer"; dsize:>4096; classtype:bad-unknown; sid:1000023; rev:1; metadata:mitre_technique_id T1590.002;)
+# --- Protocol on an unexpected port --------------------------------------------
 
-# DNS zone transfer attempt (AXFR)
-alert dns $HOME_NET any -> any 53 (msg:"SOC-LAB: DNS zone transfer (AXFR) attempt detected"; content:"|00 FC|"; offset:12; classtype:attempted-recon; sid:1000024; rev:1; metadata:mitre_technique_id T1590.002;)
+alert http $HOME_NET any -> $EXTERNAL_NET !$HTTP_PORTS (msg:"SOC-LAB Outbound HTTP on a non-standard port"; flow:established,to_server; classtype:policy-violation; sid:1000022; rev:2; metadata:mitre_technique_id T1571;)
 
-# --- SMB Lateral Movement Patterns ---
-# SMB traffic from non-server hosts
-alert tcp $HOME_NET any -> $HOME_NET 445 (msg:"SOC-LAB: SMB connection between workstations - potential lateral movement"; flow:established,to_server; classtype:policy-violation; sid:1000025; rev:1; metadata:mitre_technique_id T1021.002;)
+# --- DNS reconnaissance ----------------------------------------------------------
 
-# SMB with named pipe (potential PsExec)
-alert tcp $HOME_NET any -> $HOME_NET 445 (msg:"SOC-LAB: SMB named pipe access - potential remote execution"; flow:established,to_server; content:"|FF|SMB"; content:"\\PIPE\\"; nocase; classtype:policy-violation; sid:1000026; rev:1; metadata:mitre_technique_id T1021.002;)
+alert dns any any -> $HOME_NET any (msg:"SOC-LAB DNS zone transfer (AXFR) request"; dns.rrtype:252; classtype:attempted-recon; sid:1000024; rev:2; metadata:mitre_technique_id T1590.002;)
 
-# --- Tor Exit Node Connections ---
-alert tcp $HOME_NET any -> $EXTERNAL_NET [9001,9030,9050,9051,9150] (msg:"SOC-LAB: Connection to common Tor port"; flow:established,to_server; classtype:policy-violation; sid:1000027; rev:1; metadata:mitre_technique_id T1090.003;)
+# --- SMB lateral movement --------------------------------------------------------
 
-# --- ARP Spoofing Detection ---
-alert arp any any -> any any (msg:"SOC-LAB: ARP request flood - potential ARP spoofing"; threshold:type both,track by_src,count 50,seconds 10; classtype:bad-unknown; sid:1000028; rev:1;)
+# smb.share holds disk shares from TREE_CONNECT; pipe shares (IPC$) land in
+# smb.named_pipe instead, so ADMIN$ / C$ access is matched here.
+alert smb $EXTERNAL_NET any -> $HOME_NET any (msg:"SOC-LAB Hidden admin share accessed from outside the internal VLANs"; flow:established,to_server; smb.share; content:"$"; endswith; classtype:policy-violation; sid:1000025; rev:3; metadata:mitre_technique_id T1021.002;)
 
-# --- Cleartext Password Protocols ---
-alert tcp $HOME_NET any -> any 21 (msg:"SOC-LAB: FTP cleartext connection detected"; flow:established,to_server; content:"USER"; nocase; classtype:policy-violation; sid:1000029; rev:1;)
+# smb.named_pipe is the IPC$ tree path, not the pipe opened, so the PsExec
+# pipe is matched as its UTF-16LE name in the SMB2 CREATE request.
+alert smb any any -> $HOME_NET any (msg:"SOC-LAB PsExec service pipe opened over SMB"; flow:established,to_server; content:"|FE|SMB"; offset:4; depth:4; content:"P|00|S|00|E|00|X|00|E|00|S|00|V|00|C|00|"; nocase; distance:0; classtype:attempted-admin; sid:1000026; rev:3; metadata:mitre_technique_id T1569.002;)
 
-alert tcp $HOME_NET any -> any 23 (msg:"SOC-LAB: Telnet cleartext connection detected"; flow:to_server,established; classtype:policy-violation; sid:1000030; rev:1;)
+# --- Anonymisation / cleartext ---------------------------------------------------
+
+alert tcp $HOME_NET any -> $EXTERNAL_NET [9001,9030,9050,9051,9150] (msg:"SOC-LAB Connection attempt to a common Tor port"; flags:S,12; classtype:policy-violation; sid:1000027; rev:3; metadata:mitre_technique_id T1090.003;)
+
+alert ftp $HOME_NET any -> any any (msg:"SOC-LAB Cleartext FTP login"; flow:established,to_server; ftp.command; content:"USER"; classtype:policy-violation; sid:1000029; rev:2; metadata:mitre_technique_id T1040;)
+
+alert tcp $HOME_NET any -> any 23 (msg:"SOC-LAB Cleartext Telnet connection attempt"; flags:S,12; classtype:policy-violation; sid:1000030; rev:3; metadata:mitre_technique_id T1040;)
