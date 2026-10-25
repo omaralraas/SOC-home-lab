@@ -11,7 +11,10 @@ def wazuh_manager():
     """A wazuh-manager container running the repo's config and ruleset."""
     name = f"soclab-wazuh-test-{uuid.uuid4().hex[:8]}"
     volume_args = [arg for src, dst in MOUNTS.items() for arg in ("-v", f"{src}:{dst}:ro")]
-    started = docker("run", "-d", "--rm", "--name", name, *volume_args, IMAGE)
+    # Same nofile limit as wazuh/docker-compose.yml: analysisd raises its limit at
+    # start and logs an ERROR on hosts whose default is lower (e.g. CI runners).
+    limits = ["--ulimit", "nofile=655360:655360"]
+    started = docker("run", "-d", "--rm", "--name", name, *limits, *volume_args, IMAGE)
     assert started.returncode == 0, started.stderr
 
     try:
