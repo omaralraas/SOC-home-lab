@@ -204,6 +204,14 @@ def test_suricata_eve_from_a_real_sensor_run_is_mapped_to_ecs(stack, tmp_path):
         sh("docker", "rm", "-f", f"{project}-fb-5046")
 
 
+def test_data_streams_use_the_soc_retention_policy(stack):
+    """setup.sh attaches soc-logs (weekly rollover, 30-day delete) via logs@custom."""
+    q = {"term": {"source.ip": "198.51.100.23"}}
+    assert wait_for(lambda: count("logs-soc.syslog-lab", q) > 0, timeout=60)  # stream exists
+    explain = requests.get(f"{ES}/logs-soc.syslog-lab/_ilm/explain", auth=ADMIN, timeout=10).json()["indices"]
+    assert explain and all(index["policy"] == "soc-logs" and index["managed"] for index in explain.values()), explain
+
+
 def test_kibana_is_available(stack):
     def ready():
         resp = requests.get("http://127.0.0.1:5601/api/status", auth=ADMIN, timeout=10)
