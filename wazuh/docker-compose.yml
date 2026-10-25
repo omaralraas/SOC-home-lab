@@ -54,6 +54,8 @@ services:
       - ./shared/agent.conf:/wazuh-config-mount/etc/shared/default/agent.conf:ro
       - ./integrations/custom-soar:/wazuh-config-mount/integrations/custom-soar:ro
       - ./integrations/custom-soar.py:/wazuh-config-mount/integrations/custom-soar.py:ro
+      # SOAR audit trail, collected by the manager itself (localfile in ossec.conf)
+      - soar-logs:/var/log/soar:ro
 
   wazuh.indexer:
     image: wazuh/wazuh-indexer:4.14.8
@@ -102,7 +104,25 @@ services:
       - wazuh.indexer
       - wazuh.manager
 
+  # Receives level 10+ alerts from the custom-soar integration (ossec.conf)
+  # and serves /blocklist.txt to pfSense as a URL-table alias.
+  soar:
+    build: ../scripts/automation
+    hostname: soar
+    restart: always
+    ports:
+      - "5000:5000"
+    environment:
+      - SOAR_SHARED_SECRET=${SOAR_SHARED_SECRET}
+      - ABUSEIPDB_API_KEY=${ABUSEIPDB_API_KEY:-}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+    volumes:
+      - soar-data:/app/data
+      - soar-logs:/var/log/soar
+
 volumes:
+  soar-data:
+  soar-logs:
   wazuh_api_configuration:
   wazuh_etc:
   wazuh_logs:

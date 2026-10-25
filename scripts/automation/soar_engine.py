@@ -1,464 +1,383 @@
 #!/usr/bin/env python3
 """
 SOC Home Lab - Lightweight SOAR Engine
-========================================
-Security Orchestration, Automation, and Response engine that processes
-Wazuh alerts via webhook, enriches them with threat intelligence, and
-executes automated response actions.
+======================================
+Receives Wazuh alerts from the custom-soar integration, enriches the source
+IP, and runs the response playbook:
+
+  * block_ip  - adds the source to an expiring blocklist that pfSense pulls
+                as a URL-table alias (GET /blocklist.txt), so containment
+                needs no firewall credentials on this host
+  * notify    - Slack message for high-severity alerts
+  * recommend_disable_account - surfaced for an analyst, never automatic
+
+Safety rails: requests must carry a valid HMAC signature from the Wazuh
+integration (with a replay window), internal and allow-listed networks are
+never blocked, duplicate alerts are ignored, and every action is written as
+a JSON audit line that Wazuh ingests (wazuh/rules/custom-soar.xml).
 
 Author: Omar Alraas
-Usage:  python soar_engine.py --config config/soar_config.yml --port 5000
+Usage:  SOAR_SHARED_SECRET=... python soar_engine.py --config config/soar_config.yml
 """
 
+from __future__ import annotations
+
+import argparse
+import hashlib
+import hmac
+import ipaddress
 import json
 import logging
-import hashlib
-import argparse
-import sys
-from datetime import datetime, timedelta
-from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Optional, Any
+import os
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
-try:
-    import yaml
-    import requests
-    from flask import Flask, request, jsonify
-except ImportError:
-    print("[!] Missing dependencies. Install with: pip install -r requirements.txt")
-    sys.exit(1)
+import requests
+import yaml
+from flask import Flask, Response, jsonify, request
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.FileHandler('soar_engine.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger('SOAR')
+log = logging.getLogger("soar")
+
+SIGNATURE_HEADER = "X-SOAR-Signature"
+TIMESTAMP_HEADER = "X-SOAR-Timestamp"
 
 
-# ==============================================================================
-# Data Models
-# ==============================================================================
-
-@dataclass
-class ThreatIntel:
-    """Threat intelligence enrichment result."""
-    ip: str
-    is_malicious: bool
-    confidence_score: float  # 0.0 - 1.0
-    abuse_reports: int = 0
-    country: str = ""
-    isp: str = ""
-    categories: List[str] = field(default_factory=list)
-    source: str = "local"
-    last_checked: str = field(default_factory=lambda: datetime.now().isoformat())
+# --------------------------------------------------------------------------- #
+# Request authentication
+# --------------------------------------------------------------------------- #
 
 
-@dataclass
-class ResponseAction:
-    """Automated response action record."""
-    action_type: str  # 'block_ip', 'disable_account', 'quarantine', 'notify'
-    target: str
-    status: str = "pending"  # 'pending', 'executed', 'failed'
-    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
-    details: str = ""
-    error: Optional[str] = None
+def sign(secret: str, timestamp: str, body: bytes) -> str:
+    """Same construction as wazuh/integrations/custom-soar.py."""
+    return "sha256=" + hmac.new(secret.encode(), timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+
+
+def verify(secret: str, timestamp: str | None, signature: str | None, body: bytes, now: float, max_skew: int) -> bool:
+    if not (secret and timestamp and signature):
+        return False
+    try:
+        if abs(now - int(timestamp)) > max_skew:
+            return False  # stale or replayed request
+    except ValueError:
+        return False
+    return hmac.compare_digest(sign(secret, timestamp, body), signature)
+
+
+# --------------------------------------------------------------------------- #
+# Alert model
+# --------------------------------------------------------------------------- #
 
 
 @dataclass
-class EnrichedAlert:
-    """Alert enriched with threat intelligence and response actions."""
+class Alert:
     alert_id: str
-    original_alert: Dict[str, Any] = field(default_factory=dict)
-    rule_id: int = 0
-    rule_level: int = 0
-    rule_description: str = ""
-    source_ip: Optional[str] = None
-    agent_name: Optional[str] = None
-    timestamp: str = ""
-    threat_intel: Optional[Dict] = None
-    response_actions: List[Dict] = field(default_factory=list)
-    enrichment_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    rule_id: str
+    level: int
+    description: str
+    agent: str
+    source_ip: str | None
+    user: str | None
+    mitre: list[str]
 
-
-# ==============================================================================
-# Threat Intelligence Enrichment
-# ==============================================================================
-
-class IPReputationChecker:
-    """Checks IP reputation against threat intelligence sources."""
-
-    def __init__(self, config: Dict):
-        self.config = config
-        self.cache: Dict[str, ThreatIntel] = {}
-        self.cache_ttl = timedelta(hours=config.get('cache_ttl_hours', 24))
-        self.local_blocklist = self._load_local_blocklist(
-            config.get('local_blocklist_path', '')
-        )
-
-    def _load_local_blocklist(self, path: str) -> set:
-        """Load local IP blocklist from file."""
-        blocklist = set()
-        if path and Path(path).exists():
-            with open(path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith('#'):
-                        blocklist.add(line)
-            logger.info(f"Loaded {len(blocklist)} IPs from local blocklist")
-        return blocklist
-
-    def check(self, ip: str) -> ThreatIntel:
-        """Check IP reputation with caching."""
-        # Check cache first
-        if ip in self.cache:
-            cached = self.cache[ip]
-            cache_age = datetime.now() - datetime.fromisoformat(cached.last_checked)
-            if cache_age < self.cache_ttl:
-                logger.debug(f"Cache hit for {ip}")
-                return cached
-
-        # Check local blocklist
-        if ip in self.local_blocklist:
-            result = ThreatIntel(
-                ip=ip,
-                is_malicious=True,
-                confidence_score=0.95,
-                categories=["local_blocklist"],
-                source="local"
-            )
-            self.cache[ip] = result
-            return result
-
-        # Check AbuseIPDB API (if configured)
-        api_key = self.config.get('abuseipdb_api_key', '')
-        if api_key and api_key != 'YOUR_API_KEY_HERE':
-            result = self._check_abuseipdb(ip, api_key)
-        else:
-            # Default: not in any blocklist
-            result = ThreatIntel(
-                ip=ip,
-                is_malicious=False,
-                confidence_score=0.0,
-                source="default"
-            )
-
-        self.cache[ip] = result
-        return result
-
-    def _check_abuseipdb(self, ip: str, api_key: str) -> ThreatIntel:
-        """Query AbuseIPDB for IP reputation."""
-        try:
-            headers = {
-                'Accept': 'application/json',
-                'Key': api_key
-            }
-            params = {'ipAddress': ip, 'maxAgeInDays': 90}
-            response = requests.get(
-                'https://api.abuseipdb.com/api/v2/check',
-                headers=headers,
-                params=params,
-                timeout=10
-            )
-
-            if response.status_code == 200:
-                data = response.json().get('data', {})
-                score = data.get('abuseConfidenceScore', 0)
-                return ThreatIntel(
-                    ip=ip,
-                    is_malicious=score > 50,
-                    confidence_score=score / 100.0,
-                    abuse_reports=data.get('totalReports', 0),
-                    country=data.get('countryCode', ''),
-                    isp=data.get('isp', ''),
-                    source="abuseipdb"
-                )
-        except requests.RequestException as e:
-            logger.warning(f"AbuseIPDB lookup failed for {ip}: {e}")
-
-        return ThreatIntel(ip=ip, is_malicious=False, confidence_score=0.0, source="error")
-
-
-# ==============================================================================
-# Response Engine
-# ==============================================================================
-
-class ResponseEngine:
-    """Executes automated response actions."""
-
-    def __init__(self, config: Dict):
-        self.config = config
-        self.dry_run = config.get('dry_run', True)
-        self.blocked_ips_path = config.get('blocked_ips_path', 'blocked_ips.txt')
-
-    def block_ip(self, ip: str, reason: str) -> ResponseAction:
-        """Generate firewall block command for malicious IP."""
-        action = ResponseAction(action_type='block_ip', target=ip)
-
-        if self.dry_run:
-            action.status = 'simulated'
-            action.details = f"[DRY RUN] Would block IP {ip}: {reason}"
-            logger.info(f"[DRY RUN] Would block IP: {ip} - {reason}")
-        else:
-            try:
-                # Append to blocked IPs file
-                with open(self.blocked_ips_path, 'a') as f:
-                    f.write(f"{ip} # {reason} - {datetime.now().isoformat()}\n")
-
-                # Generate iptables command (logged for manual execution)
-                cmd = f"iptables -I INPUT -s {ip} -j DROP"
-                action.status = 'executed'
-                action.details = f"IP blocked. Command: {cmd}"
-                logger.info(f"Blocked IP: {ip} - {reason}")
-            except Exception as e:
-                action.status = 'failed'
-                action.error = str(e)
-                logger.error(f"Failed to block IP {ip}: {e}")
-
-        return action
-
-    def disable_account(self, username: str, reason: str) -> ResponseAction:
-        """Generate command to disable compromised account."""
-        action = ResponseAction(action_type='disable_account', target=username)
-
-        if self.dry_run:
-            action.status = 'simulated'
-            action.details = f"[DRY RUN] Would disable account: {username}"
-            logger.info(f"[DRY RUN] Would disable account: {username} - {reason}")
-        else:
-            action.status = 'pending_manual'
-            action.details = f"Manual action required: Disable account {username}. Reason: {reason}"
-            logger.warning(f"Manual action required: Disable account {username}")
-
-        return action
-
-    def send_notification(self, channel: str, message: str) -> ResponseAction:
-        """Send alert notification to configured channel."""
-        action = ResponseAction(action_type='notify', target=channel)
-
-        slack_webhook = self.config.get('slack_webhook_url', '')
-        if channel == 'slack' and slack_webhook and slack_webhook != 'YOUR_WEBHOOK_URL':
-            try:
-                payload = {
-                    "text": f":rotating_light: *SOC Alert*\n{message}",
-                    "username": "SOC-SOAR-Bot"
-                }
-                response = requests.post(slack_webhook, json=payload, timeout=10)
-                if response.status_code == 200:
-                    action.status = 'executed'
-                    action.details = "Slack notification sent"
-                else:
-                    action.status = 'failed'
-                    action.error = f"Slack API returned {response.status_code}"
-            except requests.RequestException as e:
-                action.status = 'failed'
-                action.error = str(e)
-        else:
-            action.status = 'simulated'
-            action.details = f"[DRY RUN] Notification: {message}"
-            logger.info(f"Notification ({channel}): {message}")
-
-        return action
-
-
-# ==============================================================================
-# Alert Processor
-# ==============================================================================
-
-class AlertProcessor:
-    """Processes incoming Wazuh alerts and coordinates enrichment and response."""
-
-    def __init__(self, config: Dict):
-        self.config = config
-        self.ip_checker = IPReputationChecker(config.get('threat_intel', {}))
-        self.response_engine = ResponseEngine(config.get('response', {}))
-        self.alert_history: List[EnrichedAlert] = []
-
-        # Auto-response thresholds
-        self.auto_block_level = config.get('auto_response', {}).get('block_ip_min_level', 10)
-        self.auto_disable_level = config.get('auto_response', {}).get('disable_account_min_level', 12)
-
-    def process(self, raw_alert: Dict) -> EnrichedAlert:
-        """Process a single alert through the enrichment and response pipeline."""
-        # Generate alert ID
-        alert_id = hashlib.sha256(
-            json.dumps(raw_alert, sort_keys=True).encode()
-        ).hexdigest()[:16]
-
-        # Extract key fields from Wazuh alert format
-        rule = raw_alert.get('rule', {})
-        agent = raw_alert.get('agent', {})
-        data = raw_alert.get('data', {})
-
-        enriched = EnrichedAlert(
+    @classmethod
+    def from_wazuh(cls, raw: dict[str, Any]) -> Alert:
+        rule, data = raw.get("rule", {}), raw.get("data", {})
+        eventdata = data.get("win", {}).get("eventdata", {})
+        source_ip = data.get("srcip") or eventdata.get("ipAddress")
+        user = data.get("dstuser") or data.get("srcuser") or eventdata.get("targetUserName")
+        alert_id = str(raw.get("id") or hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()[:16])
+        return cls(
             alert_id=alert_id,
-            original_alert=raw_alert,
-            rule_id=rule.get('id', 0),
-            rule_level=rule.get('level', 0),
-            rule_description=rule.get('description', ''),
-            source_ip=data.get('srcip', raw_alert.get('srcip')),
-            agent_name=agent.get('name', ''),
-            timestamp=raw_alert.get('timestamp', datetime.now().isoformat())
+            rule_id=str(rule.get("id", "")),
+            level=int(rule.get("level", 0)),
+            description=rule.get("description", ""),
+            agent=raw.get("agent", {}).get("name", ""),
+            source_ip=source_ip if source_ip not in ("-", "::1", "127.0.0.1") else None,
+            user=user or None,
+            mitre=rule.get("mitre", {}).get("id", []),
         )
 
-        logger.info(
-            f"Processing alert {alert_id}: "
-            f"Rule {enriched.rule_id} (Level {enriched.rule_level}) - "
-            f"{enriched.rule_description}"
-        )
 
-        # Step 1: Threat Intelligence Enrichment
-        if enriched.source_ip:
-            intel = self.ip_checker.check(enriched.source_ip)
-            enriched.threat_intel = asdict(intel)
-            logger.info(
-                f"  IP {enriched.source_ip}: malicious={intel.is_malicious}, "
-                f"score={intel.confidence_score:.2f}"
+@dataclass
+class Action:
+    action: str
+    target: str
+    status: str  # executed | skipped | failed | recommended
+    detail: str = ""
+    alert_id: str = ""
+    rule_id: str = ""
+    timestamp: float = field(default_factory=time.time)
+
+
+# --------------------------------------------------------------------------- #
+# Enrichment
+# --------------------------------------------------------------------------- #
+
+
+class Reputation:
+    """AbuseIPDB lookup with a TTL cache; private and unknown IPs score 0."""
+
+    def __init__(
+        self,
+        api_key: str | None,
+        ttl: int = 86400,
+        session: requests.Session | None = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.api_key, self.ttl, self.clock = api_key, ttl, clock
+        self.session = session or requests.Session()
+        self._cache: dict[str, tuple[float, int]] = {}
+
+    def score(self, ip: str) -> int:
+        if not self.api_key or not ipaddress.ip_address(ip).is_global:
+            return 0
+        cached = self._cache.get(ip)
+        if cached and self.clock() - cached[0] < self.ttl:
+            return cached[1]
+        try:
+            resp = self.session.get(
+                "https://api.abuseipdb.com/api/v2/check",
+                headers={"Key": self.api_key, "Accept": "application/json"},
+                params={"ipAddress": ip, "maxAgeInDays": 90},
+                timeout=10,
             )
+            resp.raise_for_status()
+            value = int(resp.json()["data"]["abuseConfidenceScore"])
+        except (requests.RequestException, KeyError, ValueError) as exc:
+            log.warning("reputation lookup failed for %s: %s", ip, exc)
+            return 0
+        self._cache[ip] = (self.clock(), value)
+        return value
 
-        # Step 2: Automated Response Actions
-        actions = self._determine_actions(enriched)
-        for action in actions:
-            enriched.response_actions.append(asdict(action))
 
-        # Step 3: Notifications
-        if enriched.rule_level >= 10:
-            notification = self.response_engine.send_notification(
-                'slack',
-                f"Level {enriched.rule_level} alert from {enriched.agent_name}: "
-                f"{enriched.rule_description} (Source: {enriched.source_ip or 'N/A'})"
-            )
-            enriched.response_actions.append(asdict(notification))
+# --------------------------------------------------------------------------- #
+# Containment and audit
+# --------------------------------------------------------------------------- #
 
-        # Store in history
-        self.alert_history.append(enriched)
 
-        return enriched
+class Blocklist:
+    """Expiring IP blocklist persisted to JSON and served to pfSense."""
 
-    def _determine_actions(self, alert: EnrichedAlert) -> List[ResponseAction]:
-        """Determine which automated response actions to take."""
+    def __init__(self, path: Path, clock: Callable[[], float] = time.time) -> None:
+        self.path, self.clock = path, clock
+        self._lock = threading.Lock()
+        self._entries: dict[str, dict[str, Any]] = {}
+        if path.exists():
+            self._entries = json.loads(path.read_text(encoding="utf-8"))
+
+    def add(self, ip: str, ttl: int, reason: str) -> bool:
+        with self._lock:
+            self._expire()
+            new = ip not in self._entries
+            self._entries[ip] = {"expires": self.clock() + ttl, "reason": reason}
+            self._save()
+            return new
+
+    def active(self) -> list[str]:
+        with self._lock:
+            self._expire()
+            return sorted(self._entries)
+
+    def _expire(self) -> None:
+        now = self.clock()
+        self._entries = {ip: e for ip, e in self._entries.items() if e["expires"] > now}
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self._entries, indent=2), encoding="utf-8")
+
+
+class AuditLog:
+    """One JSON object per line under a "soar" key, decoded by Wazuh's JSON decoder."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+
+    def write(self, action: Action) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock, self.path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"soar": asdict(action)}) + "\n")
+
+
+# --------------------------------------------------------------------------- #
+# Playbook
+# --------------------------------------------------------------------------- #
+
+
+class Playbook:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        reputation: Reputation,
+        blocklist: Blocklist,
+        audit: AuditLog,
+        notifier: Callable[[str], bool] | None = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        rules = config.get("response", {})
+        self.block_min_level = int(rules.get("block_ip_min_level", 10))
+        self.block_min_reputation = int(rules.get("block_min_reputation", 50))
+        self.always_block_rules = {str(r) for r in rules.get("always_block_rules", [])}
+        self.block_ttl = int(rules.get("block_ttl_seconds", 3600))
+        self.notify_min_level = int(rules.get("notify_min_level", 12))
+        self.disable_account_rules = {str(r) for r in rules.get("recommend_disable_account_rules", [])}
+        self.never_block = [ipaddress.ip_network(n) for n in rules.get("never_block", [])]
+        self.reputation, self.blocklist, self.audit = reputation, blocklist, audit
+        self.notifier, self.clock = notifier, clock
+        self.dedup_window = int(config.get("dedup_seconds", 600))
+        self._seen: dict[str, float] = {}
+
+    def handle(self, alert: Alert) -> list[Action]:
+        now = self.clock()
+        self._seen = {k: t for k, t in self._seen.items() if now - t < self.dedup_window}
+        if alert.alert_id in self._seen:
+            return []
+        self._seen[alert.alert_id] = now
+
         actions = []
-
-        # Auto-block IP if alert level is high and IP is malicious
-        if (alert.source_ip and
-                alert.rule_level >= self.auto_block_level and
-                alert.threat_intel and
-                alert.threat_intel.get('is_malicious', False)):
-            action = self.response_engine.block_ip(
-                alert.source_ip,
-                f"Auto-block: Rule {alert.rule_id} level {alert.rule_level}"
-            )
-            actions.append(action)
-
-        # Auto-disable account for critical alerts
-        if alert.rule_level >= self.auto_disable_level:
-            target_user = alert.original_alert.get('data', {}).get('dstuser', '')
-            if target_user:
-                action = self.response_engine.disable_account(
-                    target_user,
-                    f"Auto-disable: Rule {alert.rule_id} level {alert.rule_level}"
+        if alert.source_ip:
+            actions.append(self._maybe_block(alert))
+        if alert.user and alert.rule_id in self.disable_account_rules:
+            actions.append(
+                self._action(
+                    alert,
+                    "recommend_disable_account",
+                    alert.user,
+                    "recommended",
+                    "possible credential compromise; confirm with the user before disabling",
                 )
-                actions.append(action)
-
+            )
+        if alert.level >= self.notify_min_level and self.notifier:
+            sent = self.notifier(f"[L{alert.level}] {alert.description} | agent={alert.agent} src={alert.source_ip}")
+            actions.append(self._action(alert, "notify", "slack", "executed" if sent else "failed"))
+        for action in actions:
+            self.audit.write(action)
         return actions
 
-
-# ==============================================================================
-# Flask Webhook Server
-# ==============================================================================
-
-def create_app(config: Dict) -> Flask:
-    """Create and configure the Flask webhook application."""
-    app = Flask(__name__)
-    processor = AlertProcessor(config)
-
-    @app.route('/webhook/wazuh', methods=['POST'])
-    def wazuh_webhook():
-        """Receive and process Wazuh alert webhooks."""
+    def _maybe_block(self, alert: Alert) -> Action:
+        ip = alert.source_ip
         try:
-            alert_data = request.get_json(force=True)
-            if not alert_data:
-                return jsonify({'error': 'No JSON data received'}), 400
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return self._action(alert, "block_ip", ip, "skipped", "not an IP address")
+        if any(addr in net for net in self.never_block):
+            return self._action(alert, "block_ip", ip, "skipped", "address is on the never-block list")
+        if alert.level < self.block_min_level and alert.rule_id not in self.always_block_rules:
+            return self._action(alert, "block_ip", ip, "skipped", f"level {alert.level} below {self.block_min_level}")
+        score = self.reputation.score(ip)
+        if alert.rule_id not in self.always_block_rules and score < self.block_min_reputation:
+            return self._action(
+                alert, "block_ip", ip, "skipped", f"reputation {score} below {self.block_min_reputation}"
+            )
+        new = self.blocklist.add(ip, self.block_ttl, f"rule {alert.rule_id}: {alert.description}")
+        return self._action(
+            alert,
+            "block_ip",
+            ip,
+            "executed",
+            f"{'added to' if new else 'refreshed in'} blocklist for {self.block_ttl}s (reputation {score})",
+        )
 
-            enriched = processor.process(alert_data)
-            return jsonify({
-                'status': 'processed',
-                'alert_id': enriched.alert_id,
-                'actions_taken': len(enriched.response_actions)
-            }), 200
+    def _action(self, alert: Alert, name: str, target: str, status: str, detail: str = "") -> Action:
+        return Action(name, target, status, detail, alert.alert_id, alert.rule_id, self.clock())
 
-        except Exception as e:
-            logger.error(f"Error processing webhook: {e}")
-            return jsonify({'error': str(e)}), 500
 
-    @app.route('/health', methods=['GET'])
+def slack_notifier(webhook_url: str) -> Callable[[str], bool]:
+    def send(text: str) -> bool:
+        try:
+            return requests.post(webhook_url, json={"text": text}, timeout=10).ok
+        except requests.RequestException as exc:
+            log.warning("slack notification failed: %s", exc)
+            return False
+
+    return send
+
+
+# --------------------------------------------------------------------------- #
+# HTTP API
+# --------------------------------------------------------------------------- #
+
+
+def create_app(playbook: Playbook, secret: str, max_skew: int = 300, clock: Callable[[], float] = time.time) -> Flask:
+    app = Flask(__name__)
+    stats = {"received": 0, "rejected": 0, "actions": 0}
+
+    @app.post("/webhook/wazuh")
+    def wazuh_webhook():
+        body = request.get_data()
+        if not verify(
+            secret,
+            request.headers.get(TIMESTAMP_HEADER),
+            request.headers.get(SIGNATURE_HEADER),
+            body,
+            clock(),
+            max_skew,
+        ):
+            stats["rejected"] += 1
+            return jsonify(error="invalid or missing signature"), 401
+        try:
+            alert = Alert.from_wazuh(json.loads(body))
+        except (ValueError, TypeError) as exc:
+            return jsonify(error=f"malformed alert: {exc}"), 400
+        stats["received"] += 1
+        actions = playbook.handle(alert)
+        stats["actions"] += len(actions)
+        return jsonify(alert_id=alert.alert_id, actions=[asdict(a) for a in actions])
+
+    @app.get("/blocklist.txt")
+    def blocklist():
+        # pfSense: Firewall > Aliases > URL Table (IPs) pointing here
+        return Response("\n".join(playbook.blocklist.active()) + "\n", mimetype="text/plain")
+
+    @app.get("/health")
     def health():
-        """Health check endpoint."""
-        return jsonify({
-            'status': 'healthy',
-            'alerts_processed': len(processor.alert_history),
-            'uptime': datetime.now().isoformat()
-        }), 200
-
-    @app.route('/stats', methods=['GET'])
-    def stats():
-        """Return processing statistics."""
-        return jsonify({
-            'total_alerts': len(processor.alert_history),
-            'blocked_ips': len(processor.ip_checker.cache),
-            'cache_size': len(processor.ip_checker.cache)
-        }), 200
+        return jsonify(status="ok", **stats, blocked=len(playbook.blocklist.active()))
 
     return app
 
 
-# ==============================================================================
-# Main
-# ==============================================================================
-
-def load_config(path: str) -> Dict:
-    """Load SOAR configuration from YAML file."""
-    try:
-        with open(path, 'r') as f:
-            config = yaml.safe_load(f)
-        logger.info(f"Configuration loaded from {path}")
-        return config
-    except FileNotFoundError:
-        logger.error(f"Configuration file not found: {path}")
-        sys.exit(1)
-    except yaml.YAMLError as e:
-        logger.error(f"YAML parse error: {e}")
-        sys.exit(1)
-
-
-def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="SOC Home Lab - Lightweight SOAR Engine"
+def build_from_config(config: dict[str, Any]) -> tuple[Playbook, str]:
+    secret = os.environ.get("SOAR_SHARED_SECRET", "")
+    if not secret:
+        raise SystemExit("SOAR_SHARED_SECRET is not set; refusing to accept unsigned webhooks")
+    paths = config.get("paths", {})
+    slack = os.environ.get("SLACK_WEBHOOK_URL")
+    playbook = Playbook(
+        config,
+        Reputation(os.environ.get("ABUSEIPDB_API_KEY"), int(config.get("reputation_cache_seconds", 86400))),
+        Blocklist(Path(paths.get("blocklist", "data/blocklist.json"))),
+        AuditLog(Path(paths.get("audit_log", "/var/log/soar/actions.json"))),
+        slack_notifier(slack) if slack else None,
     )
-    parser.add_argument('--config', '-c', default='config/soar_config.yml',
-                        help='Path to SOAR configuration file')
-    parser.add_argument('--port', '-p', type=int, default=5000,
-                        help='Webhook listener port (default: 5000)')
-    parser.add_argument('--host', default='0.0.0.0',
-                        help='Webhook listener host (default: 0.0.0.0)')
-    parser.add_argument('--debug', action='store_true',
-                        help='Enable debug mode')
+    return playbook, secret
 
+
+def wsgi() -> Flask:
+    """Entry point for gunicorn: `gunicorn 'soar_engine:wsgi()'` (config path from SOAR_CONFIG)."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    with open(os.environ.get("SOAR_CONFIG", "config/soar_config.yml"), encoding="utf-8") as fh:
+        config = yaml.safe_load(fh)
+    playbook, secret = build_from_config(config)
+    return create_app(playbook, secret, int(config.get("max_clock_skew_seconds", 300)))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="SOC Home Lab SOAR engine")
+    parser.add_argument("--config", "-c", default="config/soar_config.yml")
+    parser.add_argument("--host", default="0.0.0.0")  # noqa: S104 - runs inside the SOC VLAN / container
+    parser.add_argument("--port", "-p", type=int, default=5000)
     args = parser.parse_args()
-
-    # Load configuration
-    config = load_config(args.config)
-
-    # Create and run Flask app
-    app = create_app(config)
-    logger.info(f"SOAR Engine starting on {args.host}:{args.port}")
-    app.run(host=args.host, port=args.port, debug=args.debug)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    with open(args.config, encoding="utf-8") as fh:
+        config = yaml.safe_load(fh)
+    playbook, secret = build_from_config(config)
+    create_app(playbook, secret, int(config.get("max_clock_skew_seconds", 300))).run(host=args.host, port=args.port)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
