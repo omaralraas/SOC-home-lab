@@ -5,8 +5,8 @@
 
 Technique IDs are collected from every engine (Wazuh <mitre> blocks, Sigma
 tags, Suricata metadata, YARA meta), validated against the ATT&CK release
-that pySigma ships, and rolled up per tactic. Nothing is typed in by hand,
-so the report cannot drift from the rules.
+pinned in ATTACK_VERSION, and rolled up per tactic. Nothing is typed in by
+hand, so the report cannot drift from the rules.
 """
 
 from __future__ import annotations
@@ -27,6 +27,15 @@ from sigma.rule import SigmaRule
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPORT = REPO_ROOT / "docs" / "mitre-coverage.md"
 LAYER = REPO_ROOT / "docs" / "attack-navigator-layer.json"
+
+# Left alone, pySigma loads ATT&CK from the master branch of mitre-attack/attack-stix-data and
+# caches it on disk with no expiry, so a new MITRE release (or a stale local cache) silently changes
+# the generated docs. Bump on purpose: change the version, run `python -m tools.attack_coverage`.
+ATTACK_VERSION = "20.1"
+mitre_attack.set_url(
+    "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/"
+    f"v{ATTACK_VERSION}/enterprise-attack/enterprise-attack-{ATTACK_VERSION}.json"
+)
 
 TACTIC_ORDER = [
     "reconnaissance", "resource-development", "initial-access", "execution", "persistence",

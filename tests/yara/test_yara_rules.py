@@ -6,12 +6,14 @@ from pathlib import Path
 import pytest
 import yaml
 import yara
-from sigma.data.mitre_attack import mitre_attack_techniques
+
+from tools.attack_coverage import ATTACK_VERSION, mitre_attack
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RULE_FILES = sorted((REPO_ROOT / "detection-rules" / "yara").glob("*.yar"))
 SAMPLES = yaml.safe_load((Path(__file__).parent / "samples.yml").read_text(encoding="utf-8"))
 REQUIRED_META = {"description", "author", "date", "severity", "mitre_attack"}
+KNOWN_TECHNIQUES = mitre_attack.mitre_attack_techniques  # the ATT&CK release pinned in tools.attack_coverage
 
 
 @pytest.fixture(scope="module")
@@ -54,6 +56,6 @@ def test_rule_metadata(rules):
         if missing:
             problems.append(f"{rule.identifier}: missing meta {sorted(missing)}")
         technique = rule.meta.get("mitre_attack")
-        if technique and technique not in mitre_attack_techniques:
-            problems.append(f"{rule.identifier}: {technique} is not an ATT&CK v20 technique")
+        if technique and technique not in KNOWN_TECHNIQUES:
+            problems.append(f"{rule.identifier}: {technique} is not an ATT&CK v{ATTACK_VERSION} technique")
     assert not problems, "\n".join(problems)
