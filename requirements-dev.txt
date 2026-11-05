@@ -7,7 +7,7 @@ sigma-cli==3.1.0
 yara-python==4.5.4
 scapy==2.8.0
 cryptography==50.0.2
-pytest==9.1.1
+pytest==9.2.0
 pytest-cov==7.1.0
 ruff==0.17.3
 -r scripts/automation/requirements.txt
