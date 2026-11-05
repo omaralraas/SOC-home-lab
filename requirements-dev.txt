@@ -1,9 +1,9 @@
 # Detection-as-code toolchain and test dependencies (pinned for reproducible CI)
-pysigma==1.5.1
-pysigma-backend-splunk==2.1.0
+pysigma==2.0.2
+pysigma-backend-splunk==3.0.0
 pysigma-backend-elasticsearch==2.1.1
 pysigma-backend-kusto==1.0.1
-sigma-cli==3.1.0
+sigma-cli==4.0.0
 yara-python==4.5.4
 scapy==2.8.0
 cryptography==50.0.2
