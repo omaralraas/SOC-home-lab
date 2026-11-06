@@ -9,6 +9,17 @@ updates:
     groups:
       sigma:
         patterns: ["pysigma*", "sigma-cli"]
+    # pySigma 2 is blocked: pysigma-backend-elasticsearch 2.1.1 and pysigma-backend-kusto 1.0.1
+    # (latest releases) require pysigma<2, while splunk 3 and sigma-cli 4 require pysigma>=2 (#7).
+    # The two backends are deliberately not ignored. Delete this block only after BOTH have releases
+    # that allow pysigma>=2, then bump all five pins together and regenerate the docs.
+    ignore:
+      - dependency-name: "pysigma"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pysigma-backend-splunk"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "sigma-cli"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directory: /scripts/automation
     schedule: { interval: monthly }
