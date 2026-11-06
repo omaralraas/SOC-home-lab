@@ -126,8 +126,38 @@ jobs:
       - run: pytest -m e2e tests/elastic
 
   soar-image:
-    name: SOAR container builds
+    name: SOAR container builds and serves
     runs-on: ubuntu-24.04
+    env:
+      # Throwaway value for this job only; the lab's real secret lives in wazuh/.env
+      SOAR_SHARED_SECRET: ci-only-not-a-secret
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker build -t soclab-soar:ci scripts/automation
+      - name: Container starts under gunicorn and its HEALTHCHECK passes
+        run: |
+          docker run --rm soclab-soar:ci python -VV
+          # Production CMD and HEALTHCHECK; only the probe interval is shortened
+          docker run -d --name soar -p 127.0.0.1:5000:5000 -e SOAR_SHARED_SECRET \
+            --health-interval 2s --health-retries 15 soclab-soar:ci
+          for _ in $(seq 45); do
+            status=$(docker inspect -f '{{if .State.Running}}{{.State.Health.Status}}{{else}}exited{{end}}' soar)
+            case "$status" in healthy | unhealthy | exited) break ;; esac
+            sleep 1
+          done
+          echo "container health: $status"
+          test "$status" = healthy
+      - name: Signed webhook blocks, pfSense feed and audit trail are written
+        run: |
+          curl -fsS http://127.0.0.1:5000/health
+          test "$(curl -s -o /dev/null -w '%{http_code}' --data '{}' http://127.0.0.1:5000/webhook/wazuh)" = 401
+          body='{"id":"ci.1","rule":{"id":"5763","level":10,"description":"ci smoke"},"agent":{"name":"ci"},"data":{"srcip":"10.0.2.100"}}'
+          ts=$(date +%s)
+          sig="sha256=$(printf '%s.%s' "$ts" "$body" | openssl dgst -sha256 -hmac "$SOAR_SHARED_SECRET" -r | cut -d' ' -f1)"
+          curl -fsS -H 'Content-Type: application/json' -H "X-SOAR-Timestamp: $ts" -H "X-SOAR-Signature: $sig" \
+            --data "$body" http://127.0.0.1:5000/webhook/wazuh
+          curl -fsS http://127.0.0.1:5000/blocklist.txt | grep -qx 10.0.2.100
+          docker exec soar grep -q '"action": "block_ip"' /var/log/soar/actions.json
+      - name: Container logs
+        if: always()
+        run: docker logs soar || true
